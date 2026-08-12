@@ -6,7 +6,7 @@ cd "${ROOT}"
 source "${ROOT}/scripts/lib/model_matrix.sh"
 
 # task options: othello shortest_path
-TASKS="${TASKS:-shortest_path}" # default
+TASKS="${TASKS:-shortest_path}"
 SEEDS="${SEEDS:-1337}"
 # architecture options: transformer memory_tape memory_add
 ARCHITECTURES="${ARCHITECTURES:-transformer memory_tape memory_add}" # default

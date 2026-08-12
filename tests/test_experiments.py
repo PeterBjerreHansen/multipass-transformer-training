@@ -270,7 +270,7 @@ def test_memory_add_gradient_norms_report_fusion_branch():
     loss.backward()
     norms = gradient_norms(model)
     assert norms["memory_fusion"] > 0
-    assert norms["memory_writer"] == 0
+    assert norms["memory_writer"] > 0
 
 
 def _one_step(model, optimizer, tokens, targets):

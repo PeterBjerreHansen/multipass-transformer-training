@@ -6,7 +6,7 @@ cd "${ROOT}"
 source "${ROOT}/scripts/lib/model_matrix.sh"
 
 # task options: permutation tracking pointer_chasing state_machine
-TASKS="${TASKS:-permutation tracking pointer_chasing state_machine}" # default
+TASKS="${TASKS:-permutation tracking pointer_chasing state_machine}"
 SEEDS="${SEEDS:-${SEED:-1337}}"
 # architecture options: transformer memory_tape memory_add
 ARCHITECTURES="${ARCHITECTURES:-transformer memory_tape memory_add}" # default

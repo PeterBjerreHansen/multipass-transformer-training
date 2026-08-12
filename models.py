@@ -595,15 +595,7 @@ class MultiPassTransformer(nn.Module):
     def _run_full_pass(self, token_stream: torch.Tensor, memory_tape: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-
 class MemoryAddTransformer(MultiPassTransformer):
-    """Causal decoder with a residual projection of the shifted memory tape.
-
-    The zero-initialized memory branch makes every pass exactly equivalent at
-    initialization while preserving the ordinary token stream as an
-    unmodified residual path. Training can then learn a memory correction
-    without first having to recover token information from a fused stream.
-    """
 
     block_cls = Block
 
@@ -612,14 +604,13 @@ class MemoryAddTransformer(MultiPassTransformer):
         self.mem_in_ln = LayerNorm(config.n_embd)
         self.memory_projection = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.finish_initialization()
-        nn.init.zeros_(self.memory_projection.weight)
+        nn.init.normal_(self.memory_projection.weight, mean=0.0, std=1e-3)
 
     def _run_full_pass(self, token_stream: torch.Tensor, memory_tape: torch.Tensor) -> torch.Tensor:
         hidden = token_stream + self.memory_projection(self.mem_in_ln(memory_tape))
         for block in self.transformer.h:
             hidden = block(hidden)
         return hidden
-
 
 class MemoryBlock(nn.Module):
     def __init__(self, config: MemoryTapeConfig):
@@ -646,12 +637,9 @@ class MemoryTapeTransformer(MultiPassTransformer):
     def __init__(self, config: MemoryTapeConfig):
         super().__init__(config)
         self.finish_initialization()
-        # The former scalar gate initialized every reader at 0.5. Folding that
-        # fixed scale into the residual output projection preserves the same
-        # initial function without a scale-nonidentifiable learned parameter.
         with torch.no_grad():
             for block in self.transformer.h:
-                block.cross_attn.c_proj.weight.mul_(0.5)
+                block.cross_attn.c_proj.weight.mul_(1.0)
 
     def _run_full_pass(self, token_stream: torch.Tensor, memory_tape: torch.Tensor) -> torch.Tensor:
         hidden = token_stream

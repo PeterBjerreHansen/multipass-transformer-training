@@ -155,13 +155,6 @@ correction from the shifted recurrent tape:
 > $`\textbf{for each causal decoder block:}`$<br>
 > &nbsp;&nbsp; $`H = \mathrm{DecoderBlock}(H)`$<br>
 
-The bias-free memory projection starts at exactly zero. Consequently all
-passes initially reproduce the same token-only computation, while the
-projection can immediately learn whether and how to incorporate memory.
-After input fusion, MemoryAdd uses ordinary causal decoder blocks. The explicit
-token residual prevents recurrent memory from erasing the current-token
-representation.
-
 ## Tasks
 
 The current experiments focus on algorithmic tasks featuring state-tracking where exactness is easy to measure and computational "depth" is required.

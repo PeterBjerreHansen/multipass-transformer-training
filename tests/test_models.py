@@ -173,27 +173,24 @@ def test_final_pass_loss_reaches_memory_writer_and_reader():
     assert reader.grad.abs().sum().item() > 0
 
 
-def test_memory_add_starts_as_exact_token_only_repeated_passes():
+def test_memory_add_starts_with_a_small_memory_residual():
     model = MemoryAddTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3))
     tokens = torch.randint(0, 17, (2, 6))
     output = model(tokens)
 
-    assert torch.count_nonzero(model.memory_projection.weight).item() == 0
-    for item in output.passes[1:]:
-        assert torch.equal(item.hidden_states, output.passes[0].hidden_states)
-        assert torch.equal(item.logits, output.passes[0].logits)
-        assert item.memory_states is not None
-        assert torch.equal(item.memory_states, output.passes[0].memory_states)
+    projection = model.memory_projection.weight
+    assert torch.count_nonzero(projection).item() > 0
+    assert projection.std().item() == pytest.approx(1e-3, rel=0.3)
 
     token_stream = model.embed_tokens(tokens)
     random_memory = torch.randn_like(token_stream)
     baseline = model.forward_pass(token_stream, torch.zeros_like(token_stream))
     with_memory = model.forward_pass(token_stream, random_memory)
-    assert torch.equal(with_memory.hidden_states, baseline.hidden_states)
-    assert torch.equal(with_memory.logits, baseline.logits)
+    assert not torch.equal(with_memory.hidden_states, baseline.hidden_states)
+    assert not torch.equal(with_memory.logits, baseline.logits)
 
 
-def test_memory_add_projection_learns_before_memory_writer():
+def test_memory_add_projection_and_writer_receive_gradients():
     model = MemoryAddTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3))
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     tokens = torch.randint(0, 17, (2, 6))
@@ -204,7 +201,7 @@ def test_memory_add_projection_learns_before_memory_writer():
     assert model.memory_projection.weight.grad is not None
     assert model.memory_projection.weight.grad.abs().sum().item() > 0
     assert model.mem_head.weight.grad is not None
-    assert model.mem_head.weight.grad.abs().sum().item() == 0
+    assert model.mem_head.weight.grad.abs().sum().item() > 0
 
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
