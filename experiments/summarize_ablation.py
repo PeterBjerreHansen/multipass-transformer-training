@@ -15,6 +15,7 @@ QUALITY_MARGIN = 0.01
 THROUGHPUT_WIN = 0.10
 SIZE_WIN = 0.25
 TASK_QUALITY_METRICS = {
+    "maze": "drift.append_recurrent.optimal_path",
     "shortest_path": "drift.append_recurrent.optimal_path",
     "othello": "drift.append_recurrent.sequence_legality",
 }

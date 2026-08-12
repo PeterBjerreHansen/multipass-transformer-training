@@ -75,7 +75,7 @@ def test_trace_launcher_runs_task_matrix_into_task_first_results(tmp_path):
             "PATH": f"{bin_dir}:{env['PATH']}",
             "REAL_PYTHON": sys.executable,
             "DEVICE": "cpu",
-            "TASKS": "shortest_path othello",
+            "TASKS": "shortest_path maze othello",
             "ARCHITECTURES": "memory_add",
             "SEEDS": "1337",
             "RESULT_ROOT": str(tmp_path / "results"),
@@ -93,17 +93,22 @@ def test_trace_launcher_runs_task_matrix_into_task_first_results(tmp_path):
     training_calls = [
         call for call in calls if "-m experiments.train_trace" in call
     ]
-    assert len(training_calls) == 2
+    assert len(training_calls) == 3
     assert "--preset shortest_path_main" in training_calls[0]
-    assert "--preset othello_main" in training_calls[1]
+    assert "--preset maze_main" in training_calls[1]
+    assert "--preset othello_main" in training_calls[2]
     assert all("--architecture memory_add" in call for call in training_calls)
     assert (
         f"--run-dir {tmp_path}/results/shortest_path/main/memory_add/seed_1337"
         in training_calls[0]
     )
     assert (
-        f"--run-dir {tmp_path}/results/othello/main/memory_add/seed_1337"
+        f"--run-dir {tmp_path}/results/maze/main/memory_add/seed_1337"
         in training_calls[1]
+    )
+    assert (
+        f"--run-dir {tmp_path}/results/othello/main/memory_add/seed_1337"
+        in training_calls[2]
     )
 
 

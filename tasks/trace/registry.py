@@ -5,6 +5,8 @@ import random
 from typing import Callable
 
 from tasks.trace import (
+    maze,
+    maze_eval,
     othello,
     othello_eval,
     shortest_path,
@@ -106,7 +108,42 @@ def _shortest_path_metrics(model, batch, args, inference_mode: str | None):
     )
 
 
+def _maze_vocab(args):
+    return maze.build_maze_vocab(args.maze_distribution)
+
+
+def _maze_block_size(args) -> int:
+    return maze.required_block_size(args.maze_distribution)
+
+
+def _maze_batch(args, stoi, rng: random.Random, _split: str):
+    return maze.build_maze_batch(
+        batch_size=args.batch_size,
+        distribution_name=args.maze_distribution,
+        stoi=stoi,
+        device=args.device,
+        rng=rng,
+    )
+
+
+def _maze_metrics(model, batch, args, inference_mode: str | None):
+    return maze_eval.generation_metrics(
+        model,
+        batch,
+        args,
+        inference_mode=inference_mode,
+    )
+
+
 TRACE_TASKS: dict[str, TraceTask] = {
+    "maze": TraceTask(
+        name="maze",
+        build_vocab_fn=_maze_vocab,
+        required_block_size_fn=_maze_block_size,
+        build_batch_fn=_maze_batch,
+        generation_metrics_fn=_maze_metrics,
+        format_metrics_fn=maze_eval.format_metrics,
+    ),
     "othello": TraceTask(
         name="othello",
         build_vocab_fn=_othello_vocab,

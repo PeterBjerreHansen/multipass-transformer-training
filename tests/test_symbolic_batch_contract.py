@@ -6,7 +6,7 @@ import torch
 
 from tasks.bbh import permutation, pointer_chasing, state_machine, tracking
 from tasks.common import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, SEP_TOKEN
-from tasks.trace import othello, shortest_path
+from tasks.trace import maze, othello, shortest_path
 
 
 def _assert_symbolic_batch_contract(
@@ -133,6 +133,21 @@ def test_symbolic_task_batches_follow_shared_contract(tmp_path):
         stoi=distribution_vocab[1],
         vocab_size=len(distribution_vocab[0]),
         required_block_size=shortest_path.required_block_size("main"),
+    )
+
+    maze_vocab = maze.build_maze_vocab("searchformer_10")
+    maze_batch = maze.build_maze_batch(
+        batch_size=3,
+        distribution_name="searchformer_10",
+        stoi=maze_vocab[1],
+        device="cpu",
+        rng=random.Random(2029),
+    )
+    _assert_symbolic_batch_contract(
+        maze_batch,
+        stoi=maze_vocab[1],
+        vocab_size=len(maze_vocab[0]),
+        required_block_size=maze.required_block_size("searchformer_10"),
     )
 
     kwargs = {

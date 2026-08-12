@@ -36,6 +36,7 @@ PRIMARY_METRICS = {
     "state_machine": "exact_match",
     "othello": "token_legality",
     "shortest_path": "optimal_path",
+    "maze": "optimal_path",
 }
 
 METRIC_LABELS = {
@@ -105,6 +106,7 @@ def _config_context(run_dir: Path, *, root: Path | None = None) -> dict:
         "max_level": args.get("max_level"),
         "curriculum_threshold": args.get("curriculum_threshold"),
         "shortest_path_distribution": args.get("shortest_path_distribution"),
+        "maze_distribution": args.get("maze_distribution"),
         "total_parameters": model_stats.get("total_parameters"),
         "non_embedding_parameters": model_stats.get("non_embedding_parameters"),
     }

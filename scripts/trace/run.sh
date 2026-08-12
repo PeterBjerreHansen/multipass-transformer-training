@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
 source "${ROOT}/scripts/lib/model_matrix.sh"
 
-# task options: othello shortest_path
+# task options: maze othello shortest_path
 TASKS="${TASKS:-shortest_path}"
 SEEDS="${SEEDS:-1337}"
 # architecture options: transformer memory_tape memory_add
@@ -21,9 +21,9 @@ read -r -a seed_matrix <<< "${SEEDS}"
 validate_architecture_matrix "${architecture_matrix[@]}"
 
 for task in "${task_matrix[@]}"; do
-  if [[ "${task}" != "shortest_path" && "${task}" != "othello" ]]; then
+  if [[ "${task}" != "maze" && "${task}" != "shortest_path" && "${task}" != "othello" ]]; then
     echo "invalid trace task: ${task}" >&2
-    echo "valid trace tasks: shortest_path othello" >&2
+    echo "valid trace tasks: maze shortest_path othello" >&2
     exit 2
   fi
 done

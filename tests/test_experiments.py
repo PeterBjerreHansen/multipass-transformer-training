@@ -39,7 +39,7 @@ from models import (
     MultiPassConfig,
 )
 from tasks.bbh import pointer_chasing
-from tasks.trace import othello, shortest_path
+from tasks.trace import maze, othello, shortest_path
 from tasks.trace.othello_eval import (
     build_eval_examples,
     legal_set_step_metrics,
@@ -413,8 +413,33 @@ def test_shortest_path_main_uses_warmup_cosine_learning_rate():
     assert path["lr_warmup_steps"] == 4_000
     assert path["lr_decay_steps"] == path["train_steps"] == 200_000
     for name, preset in TRACE_PRESETS.items():
-        if name != "shortest_path_main":
+        if name not in {"maze_main", "shortest_path_main"}:
             assert preset.values["lr_schedule"] == "constant"
+
+
+def test_maze_cli_exposes_named_searchformer_distributions():
+    main = parse_trace_args(["--preset", "maze_main"])
+    smoke = parse_trace_args(["--preset", "maze_smoke"])
+    assert main.task == "maze"
+    assert main.maze_distribution == "searchformer_10"
+    assert smoke.maze_distribution == "smoke"
+    for distribution_name in (
+        "searchformer_10",
+        "searchformer_20",
+        "searchformer_30",
+    ):
+        args = parse_trace_args(
+            [
+                "--preset",
+                "maze_main",
+                "--maze-distribution",
+                distribution_name,
+            ]
+        )
+        assert args.maze_distribution == distribution_name
+    assert maze.required_block_size("searchformer_10") == 107
+    assert maze.required_block_size("searchformer_20") == 407
+    assert maze.required_block_size("searchformer_30") == 907
 
 
 def test_main_presets_use_declared_experiment_scales():
@@ -624,6 +649,19 @@ def test_main_trace_preset_contract_is_frozen():
             "eval_interval": 5_000,
             "eval_batches": 4,
             "shortest_path_distribution": "main",
+        },
+        "maze_main": {
+            "task": "maze",
+            "batch_size": 64,
+            "train_steps": 200_000,
+            "lr": 5e-4,
+            "lr_schedule": "warmup_cosine",
+            "min_lr": 1e-5,
+            "lr_warmup_steps": 4_000,
+            "lr_decay_steps": 200_000,
+            "eval_interval": 5_000,
+            "eval_batches": 4,
+            "maze_distribution": "searchformer_10",
         },
     }
     for name, contract in contracts.items():

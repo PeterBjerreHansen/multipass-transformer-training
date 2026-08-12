@@ -186,6 +186,49 @@ def test_othello_random_prefix_evaluation_cli(tmp_path):
     assert len(rows) == 2
 
 
+def test_maze_training_and_solver_based_evaluation_cli(tmp_path):
+    run_dir = tmp_path / "maze"
+    result = _run(
+        "-m", "experiments.train_trace",
+        "--preset", "maze_smoke",
+        "--architecture", "memory_tape",
+        "--device", "cpu",
+        "--run-dir", str(run_dir),
+    )
+    assert "task: maze" in result.stdout
+    assert (run_dir / "best.pt").exists()
+    events = [
+        json.loads(line)
+        for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    evaluation = next(event for event in events if event["event"] == "eval")
+    for metric in (
+        "optimal_path",
+        "exact_path",
+        "goal_reached",
+        "legal_prefix_fraction",
+        "mean_target_path_length",
+        "mean_wall_fraction",
+        "multiple_shortest_paths",
+    ):
+        assert metric in evaluation["metrics"]
+
+    eval_dir = tmp_path / "maze_eval"
+    _run(
+        "-m", "experiments.eval_trace",
+        "--input-run-dir", str(run_dir),
+        "--inference-mode", "append_recurrent",
+        "--token-selection", "argmax",
+        "--device", "cpu",
+        "--eval-batches", "1",
+        "--output-dir", str(eval_dir),
+    )
+    summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["task"] == "maze"
+    assert summary["effective_inference_mode"] == "append_recurrent"
+    assert "optimal_path" in summary["metrics"]
+
+
 def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
     tmp_path,
 ):

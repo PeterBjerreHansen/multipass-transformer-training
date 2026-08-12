@@ -25,7 +25,7 @@ if [[ "${architecture}" != "transformer" ]]; then
 fi
 
 case "${task}" in
-  shortest_path)
+  maze|shortest_path)
     for inference_mode in "${inference_modes[@]}"; do
       python -m experiments.eval_trace \
         --input-run-dir "${RUN_DIR}" \

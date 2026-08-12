@@ -171,6 +171,7 @@ The current experiment tasks are:
 - `permutation`: permutation composition by repeated swaps.
 - `othello`: legal Othello move-trace generation from the standard fixed board, evaluated by continuation legality and teacher-forced legal-set probability.
 - `shortest_path`: shuffled, node-permuted directed acyclic graphs with exactly one shortest route from the declared start to goal; the model generates the complete optimal node path. Its benchmark distributions are `easy` and `main`, and each varies graph size, route length, edge density, and detour shape from example to example.
+- `maze`: [Searchformer-style](https://arxiv.org/abs/2402.14083) random-wall grids represented by start, goal, and blocked-cell coordinates; the model generates a complete shortest coordinate path. Named distributions cover the published 10x10, 20x20, and 30x30 grid sizes.
 
 The live experiment API is family-specific and preset-driven. `python3 -m experiments.train_bbh` runs the BBH-inspired tasks with final-answer-only supervision and curriculum promotions. `python3 -m experiments.train_trace` runs the trace tasks from named presets with fixed trace targets.
 
@@ -200,6 +201,42 @@ python3 -m experiments.train_trace \
   --architecture memory_tape \
   --run-dir results/trace/shortest_path/main/memory_tape/example_run
 ```
+
+Trace training on 10x10 random-wall mazes:
+
+```bash
+python3 -m experiments.train_trace \
+  --preset maze_main \
+  --architecture memory_tape \
+  --run-dir results/trace/maze/main/memory_tape/example_run
+```
+
+`maze_main` uses the `searchformer_10` distribution. It samples a wall density
+uniformly between 30% and 50%, blocks that many cells, samples distinct open
+start and goal cells, and rejects instances that are unsolvable or whose
+shortest path has fewer than 10 moves. The prompt lists only the start, goal,
+and wall coordinates; the target contains one deterministic BFS shortest path,
+including both endpoints. Wall coordinates are shuffled independently so their
+order does not expose a row-major scan.
+
+The same implementation exposes `searchformer_20` and `searchformer_30` through
+`--maze-distribution`. Their required context lengths are 407 and 907 tokens,
+respectively, so they should not inherit the 10x10 batch size without checking
+memory use. `maze_smoke` is a 5x5 software check with lower wall density; it is
+not a literature-comparison distribution.
+
+Maze evaluation reports both `exact_path`, which requires the generated path to
+match the canonical BFS target, and `optimal_path`, which accepts any legal
+shortest route. The latter is the primary quality metric because random-wall
+mazes commonly have multiple optimal solutions. `goal_reached` and
+`legal_prefix_fraction` separate malformed routes from routes that remain legal
+but do not finish correctly.
+
+This first integration samples mazes online to match the repository's existing
+synthetic trace tasks. It follows Searchformer's random-wall geometry and
+minimum-path filter, but it is not an exact reproduction of Searchformer's
+finite deduplicated datasets or A* tie-breaking. The canonical target comes
+from fixed-order BFS; solver-based `optimal_path` is independent of that choice.
 
 `shortest_path_main` runs for 200,000 optimizer steps. Its learning rate warms
 linearly to `5e-4` over the first 4,000 steps, then decays by a cosine schedule
@@ -311,6 +348,8 @@ Evaluation code follows the same separation as training:
   prefix-continuation summaries.
 - `tasks/trace/shortest_path_eval.py` defines optimal-path, path-length, and
   per-step metrics.
+- `tasks/trace/maze_eval.py` verifies generated maze routes against the prompt
+  and scores any legal shortest path as optimal.
 - `experiments/eval_trace.py` is the shared checkpoint and batch runner for
   ordinary trace evaluation.
 - `experiments/eval_othello_prefix.py` runs Othello's additional random-prefix

@@ -5,6 +5,7 @@ import random
 import time
 
 from tasks.trace.registry import TRACE_TASKS, get_trace_task
+from tasks.trace.maze import MAZE_DISTRIBUTIONS
 from experiments.common import (
     apply_learning_rate,
     append_jsonl,
@@ -70,6 +71,11 @@ def parse_args(argv: list[str] | None = None):
         parser,
         "--shortest-path-distribution",
         choices=["easy", "main"],
+    )
+    _add_override(
+        parser,
+        "--maze-distribution",
+        choices=sorted(MAZE_DISTRIBUTIONS),
     )
     _add_override(parser, "--othello-data-dir")
     _add_override(parser, "--othello-train-games", type=int)

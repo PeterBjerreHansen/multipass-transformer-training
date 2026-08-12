@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from tasks.bbh import permutation, pointer_chasing, state_machine, tracking
-from tasks.trace import othello, shortest_path
+from tasks.trace import othello
 
 
 @dataclass(frozen=True)
@@ -163,6 +163,36 @@ shortest_path_smoke.update(
 TRACE_PRESETS["shortest_path_smoke"] = ExperimentPreset(
     "One-step software check using the easy shortest-path distribution.",
     shortest_path_smoke,
+)
+
+maze_main = _trace_defaults(
+    task="maze",
+    smoke=False,
+    token_selection="argmax",
+)
+maze_main.update(
+    maze_distribution="searchformer_10",
+    train_steps=200_000,
+    lr=5e-4,
+    lr_schedule="warmup_cosine",
+    min_lr=1e-5,
+    lr_warmup_steps=4_000,
+    lr_decay_steps=200_000,
+)
+TRACE_PRESETS["maze_main"] = ExperimentPreset(
+    "Searchformer-style 10x10 random-wall maze paths.",
+    maze_main,
+)
+
+maze_smoke = _trace_defaults(
+    task="maze",
+    smoke=True,
+    token_selection="argmax",
+)
+maze_smoke.update(maze_distribution="smoke")
+TRACE_PRESETS["maze_smoke"] = ExperimentPreset(
+    "One-step software check using small random-wall mazes.",
+    maze_smoke,
 )
 
 
