@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from models import (
     CausalTransformer,
+    LatentFeedbackTransformer,
     MemoryAddTransformer,
     MemoryTapeConfig,
     MemoryTapeTransformer,
@@ -14,6 +15,7 @@ ARCHITECTURES = (
     "transformer",
     "memory_tape",
     "memory_add",
+    "latent_feedback",
 )
 
 
@@ -41,6 +43,13 @@ def build_model(args, vocab_size: int, block_size: int, device: str):
         )
     elif args.architecture == "memory_add":
         model = MemoryAddTransformer(
+            MultiPassConfig(
+                **common,
+                n_pass=args.n_pass,
+            )
+        )
+    elif args.architecture == "latent_feedback":
+        model = LatentFeedbackTransformer(
             MultiPassConfig(
                 **common,
                 n_pass=args.n_pass,

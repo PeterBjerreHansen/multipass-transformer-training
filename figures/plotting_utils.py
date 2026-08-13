@@ -22,6 +22,7 @@ ARCHITECTURE_COLORS = {
     "transformer": "#6b7280",
     "memory_tape": "#e68613",
     "memory_add": "#2a9d8f",
+    "latent_feedback": "#7c3aed",
 }
 
 INFERENCE_MODE_STYLES = {

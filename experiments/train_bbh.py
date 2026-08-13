@@ -38,6 +38,7 @@ from experiments.common import (
     validate_training_args,
 )
 from experiments.presets import BBH_PRESETS, preset_help_text, resolve_preset_args
+from experiments.pass_schedule import build_pass_scheduler
 from model_factory import ARCHITECTURES
 
 
@@ -132,6 +133,12 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-embd", type=int)
     _add_override(parser, "--n-pass", type=int)
     _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
+    _add_override(
+        parser,
+        "--train-pass-schedule",
+        nargs="+",
+        metavar="START=PASS:WEIGHT,...",
+    )
     _add_override(
         parser,
         "--num-nodes",
@@ -253,6 +260,10 @@ def run_answer_curriculum(args) -> None:
     validate_model_args(args)
     validate_training_args(args)
     validate_task_args(args)
+    pass_scheduler = build_pass_scheduler(
+        args,
+        seed=stable_seed(args.seed, "latent-feedback", "pass-schedule"),
+    )
     task, block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
     artifacts = prepare_run_artifacts(
         args,
@@ -272,6 +283,8 @@ def run_answer_curriculum(args) -> None:
         current_level = int(extra["current_level"])
         promotion_history = [tuple(item) for item in extra["promotion_history"]]
         train_rng.setstate(extra["train_rng_state"])
+        if pass_scheduler is not None:
+            pass_scheduler.load_state_dict(extra["pass_scheduler_state"])
         best_eval_score = tuple(extra["best_eval_score"])
         saved_best_step = extra["best_eval_step"]
         best_eval_step = None if saved_best_step is None else int(saved_best_step)
@@ -286,9 +299,14 @@ def run_answer_curriculum(args) -> None:
     print(f"block_size: {block_size}")
     print(f"parameters: {model.get_num_params():,}")
     if args.architecture != "transformer":
-        normalized = [weight / sum(args.pass_loss_weights) for weight in args.pass_loss_weights]
         print(f"n_pass: {args.n_pass}")
-        print(f"pass_loss_weights_normalized: {normalized}")
+        if args.architecture == "latent_feedback":
+            print("pass_loss_objective: standard + mean(feedback passes)")
+        else:
+            normalized = [weight / sum(args.pass_loss_weights) for weight in args.pass_loss_weights]
+            print(f"pass_loss_weights_normalized: {normalized}")
+    if pass_scheduler is not None:
+        print(f"train_pass_schedule: {args.train_pass_schedule}")
     append_jsonl(
         artifacts.metrics_path,
         {
@@ -319,7 +337,13 @@ def run_answer_curriculum(args) -> None:
             rng=train_rng,
         )
         optimizer.zero_grad(set_to_none=True)
-        loss, _output, pass_losses = forward_and_loss(model, batch, args)
+        sampled_n_pass = pass_scheduler.sample(step) if pass_scheduler is not None else None
+        loss, _output, pass_losses = forward_and_loss(
+            model,
+            batch,
+            args,
+            n_pass=sampled_n_pass,
+        )
         loss.backward()
         update_gradient_norm_window(gradient_norm_window, gradient_norms(model))
         clip_gradients(model, args.max_grad_norm)
@@ -338,6 +362,8 @@ def run_answer_curriculum(args) -> None:
         fields.append(format_gradient_norms(gradient_summary))
         if args.architecture != "transformer":
             fields.append(f"pass_losses {format_pass_losses(pass_losses)}")
+        if sampled_n_pass is not None:
+            fields.append(f"sampled_passes {sampled_n_pass}")
         print(format_checkpoint_line(f"step {step}", fields))
 
         evaluated_level = current_level
@@ -363,24 +389,24 @@ def run_answer_curriculum(args) -> None:
         if is_best_checkpoint:
             best_eval_score = eval_score
             best_eval_step = step
-        append_jsonl(
-            artifacts.metrics_path,
-            {
-                "event": "eval",
-                "step": step,
-                "level": evaluated_level,
-                "sampled_train_level": sampled_level,
-                "train_loss": float(loss.item()),
-                "pass_losses": [float(item.item()) for item in pass_losses],
-                "metrics": metrics,
-                "gradient_norms": gradient_summary,
-                "train_tok_per_s": tok_per_s,
-                "resource_stats": runtime_resource_stats(args.device),
-                "is_best_checkpoint": is_best_checkpoint,
-                "best_eval_score": best_eval_score,
-                "best_eval_step": best_eval_step,
-            },
-        )
+        eval_event = {
+            "event": "eval",
+            "step": step,
+            "level": evaluated_level,
+            "sampled_train_level": sampled_level,
+            "train_loss": float(loss.item()),
+            "pass_losses": [float(item.item()) for item in pass_losses],
+            "metrics": metrics,
+            "gradient_norms": gradient_summary,
+            "train_tok_per_s": tok_per_s,
+            "resource_stats": runtime_resource_stats(args.device),
+            "is_best_checkpoint": is_best_checkpoint,
+            "best_eval_score": best_eval_score,
+            "best_eval_step": best_eval_step,
+        }
+        if pass_scheduler is not None:
+            eval_event["pass_schedule"] = pass_scheduler.stats()
+        append_jsonl(artifacts.metrics_path, eval_event)
 
         if exact_match >= args.curriculum_threshold and current_level < args.max_level:
             promotion_history.append((current_level, step, exact_match))
@@ -395,6 +421,8 @@ def run_answer_curriculum(args) -> None:
             "best_eval_score": best_eval_score,
             "best_eval_step": best_eval_step,
         }
+        if pass_scheduler is not None:
+            checkpoint_extra["pass_scheduler_state"] = pass_scheduler.state_dict()
         save_latest_checkpoint(
             artifacts,
             model=model,

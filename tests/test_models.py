@@ -9,6 +9,7 @@ from model_factory import build_model
 from models import (
     CausalCrossAttention,
     CausalTransformer,
+    LatentFeedbackTransformer,
     LayerNorm,
     MemoryAddTransformer,
     MemoryBlock,
@@ -120,6 +121,7 @@ def test_causal_transformer_structured_output_and_generation():
     [
         (MemoryTapeTransformer, MemoryTapeConfig(8, 17, 1, 1, 8, 3)),
         (MemoryAddTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
+        (LatentFeedbackTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
     ],
 )
 def test_multipass_models_return_all_passes_and_finite_losses(model_class, config):
@@ -129,7 +131,8 @@ def test_multipass_models_return_all_passes_and_finite_losses(model_class, confi
     output = model(tokens)
     assert len(output.passes) == 3
     assert all(item.memory_states is not None for item in output.passes)
-    assert torch.isfinite(model.calc_total_loss(output, targets, [0, 0, 1]).loss)
+    weights = None if model_class is LatentFeedbackTransformer else [0, 0, 1]
+    assert torch.isfinite(model.calc_total_loss(output, targets, weights).loss)
 
 
 def test_memory_tape_is_causal_in_tokens_and_emitted_memory():
@@ -292,6 +295,7 @@ def test_generation_restores_mode_and_validates_sampling_even_for_zero_tokens():
     [
         MemoryTapeTransformer(MemoryTapeConfig(8, 17, 1, 1, 8, 3)),
         MemoryAddTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
+        LatentFeedbackTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
     ],
 )
 def test_all_multipass_models_support_append_recurrent(model):
@@ -312,6 +316,7 @@ def test_model_factory_constructs_supported_architectures():
         "transformer": CausalTransformer,
         "memory_tape": MemoryTapeTransformer,
         "memory_add": MemoryAddTransformer,
+        "latent_feedback": LatentFeedbackTransformer,
     }
     for architecture, model_class in expected.items():
         model = build_model(SimpleNamespace(architecture=architecture, **base), 17, 8, "cpu")

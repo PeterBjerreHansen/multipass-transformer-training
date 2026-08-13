@@ -14,7 +14,6 @@ RESULT_ROOT="${RESULT_ROOT:-results/bbh}"
 
 runtime_args=()
 [[ -n "${DEVICE:-}" ]] && runtime_args+=(--device "${DEVICE}")
-[[ -n "${TRAIN_STEPS:-}" ]] && runtime_args+=(--train-steps "${TRAIN_STEPS}")
 
 read -r -a task_matrix <<< "${TASKS}"
 read -r -a architecture_matrix <<< "${ARCHITECTURES}"

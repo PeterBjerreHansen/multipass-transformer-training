@@ -41,6 +41,7 @@ from experiments.common import (
     validate_training_args,
 )
 from experiments.presets import TRACE_PRESETS, preset_help_text, resolve_preset_args
+from experiments.pass_schedule import build_pass_scheduler
 from model_factory import ARCHITECTURES
 
 
@@ -71,6 +72,12 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-embd", type=int)
     _add_override(parser, "--n-pass", type=int)
     _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
+    _add_override(
+        parser,
+        "--train-pass-schedule",
+        nargs="+",
+        metavar="START=PASS:WEIGHT,...",
+    )
     _add_override(parser, "--shortest-path-data-dir")
     _add_override(parser, "--maze-data-dir")
     _add_override(
@@ -218,6 +225,10 @@ def run_trace_training(args) -> None:
     validate_model_args(args)
     validate_training_args(args)
     validate_task_args(args)
+    pass_scheduler = build_pass_scheduler(
+        args,
+        seed=stable_seed(args.seed, "latent-feedback", "pass-schedule"),
+    )
     block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
     extra_config = {"script": "experiments.train_trace"}
     if args.task == "shortest_path":
@@ -239,6 +250,8 @@ def run_trace_training(args) -> None:
         saved_best_step = extra["best_eval_step"]
         best_eval_step = None if saved_best_step is None else int(saved_best_step)
         train_rng.setstate(extra["train_rng_state"])
+        if pass_scheduler is not None:
+            pass_scheduler.load_state_dict(extra["pass_scheduler_state"])
         apply_learning_rate(optimizer, args, resume_step)
 
     print(f"device: {args.device}")
@@ -257,9 +270,14 @@ def run_trace_training(args) -> None:
     else:
         print(f"lr_schedule: constant | lr {args.lr:.3g}")
     if args.architecture != "transformer":
-        total_weight = sum(args.pass_loss_weights)
         print(f"n_pass: {args.n_pass}")
-        print(f"pass_loss_weights_normalized: {[weight / total_weight for weight in args.pass_loss_weights]}")
+        if args.architecture == "latent_feedback":
+            print("pass_loss_objective: standard + mean(feedback passes)")
+        else:
+            total_weight = sum(args.pass_loss_weights)
+            print(f"pass_loss_weights_normalized: {[weight / total_weight for weight in args.pass_loss_weights]}")
+    if pass_scheduler is not None:
+        print(f"train_pass_schedule: {args.train_pass_schedule}")
     run_event = {
         "event": "run_start" if checkpoint is None else "run_resume",
         "step": resume_step,
@@ -285,7 +303,13 @@ def run_trace_training(args) -> None:
         model.train()
         batch = build_task_batch(args, stoi, train_rng, split="train")
         optimizer.zero_grad(set_to_none=True)
-        loss, _output, pass_losses = forward_and_loss(model, batch, args)
+        sampled_n_pass = pass_scheduler.sample(step) if pass_scheduler is not None else None
+        loss, _output, pass_losses = forward_and_loss(
+            model,
+            batch,
+            args,
+            n_pass=sampled_n_pass,
+        )
         loss.backward()
         update_gradient_norm_window(gradient_norm_window, gradient_norms(model))
         clip_gradients(model, args.max_grad_norm)
@@ -308,6 +332,8 @@ def run_trace_training(args) -> None:
         fields.append(format_gradient_norms(gradient_summary))
         if args.architecture != "transformer":
             fields.append(f"pass_losses {format_pass_losses(pass_losses)}")
+        if sampled_n_pass is not None:
+            fields.append(f"sampled_passes {sampled_n_pass}")
         print(format_checkpoint_line(f"step {step}", fields))
 
         metrics = evaluate_prebuilt_batches(
@@ -343,6 +369,8 @@ def run_trace_training(args) -> None:
             "best_eval_loss": best_eval_loss,
             "best_eval_step": best_eval_step,
         }
+        if pass_scheduler is not None:
+            eval_event["pass_schedule"] = pass_scheduler.stats()
         if args.task == "shortest_path":
             eval_event["dataset_split"] = "validation"
         append_jsonl(artifacts.metrics_path, eval_event)
@@ -351,6 +379,8 @@ def run_trace_training(args) -> None:
             "best_eval_loss": best_eval_loss,
             "best_eval_step": best_eval_step,
         }
+        if pass_scheduler is not None:
+            checkpoint_extra["pass_scheduler_state"] = pass_scheduler.state_dict()
         save_latest_checkpoint(
             artifacts,
             model=model,

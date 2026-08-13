@@ -79,6 +79,9 @@ def validate_model_args(args) -> None:
 
     if args.n_pass < 2:
         raise ValueError("--n-pass must be at least 2 for multi-pass architectures")
+    if args.architecture == "latent_feedback":
+        args.pass_loss_weights = None
+        return
     if args.pass_loss_weights is None:
         args.pass_loss_weights = [1.0] * args.n_pass
     if len(args.pass_loss_weights) != args.n_pass:
@@ -279,8 +282,10 @@ def effective_inference_mode(args, requested_mode: str | None = None) -> str:
     return requested_mode or args.inference_mode
 
 
-def forward_and_loss(model, batch, args):
-    output = model(batch.idx)
+def forward_and_loss(model, batch, args, *, n_pass: int | None = None):
+    if n_pass is not None and not is_multi_pass_architecture(args.architecture):
+        raise ValueError("n_pass overrides require a multi-pass architecture")
+    output = model(batch.idx, n_pass=n_pass) if n_pass is not None else model(batch.idx)
     if not is_multi_pass_architecture(args.architecture):
         loss = model.calc_loss(output.logits, batch.targets)
         return loss, output, (loss.detach(),)
@@ -310,7 +315,7 @@ def gradient_norms(model) -> dict[str, float]:
 
         if "cross_attn" in name or "ln_mem_kv" in name:
             group = "memory_attention"
-        elif name.startswith(("memory_projection", "mem_in_ln")):
+        elif name.startswith(("memory_projection", "mem_in_ln", "feedback_")):
             group = "memory_fusion"
         elif name.startswith(("mem_head", "ln_mem")):
             group = "memory_writer"
