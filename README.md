@@ -2,6 +2,15 @@
 
 This project explores a way to train transformers for recurrent-style inference without training them as token time recurrent models. The key idea is to train transformers with multiple passes over the same token-sequence. Earlier passes write per-token memory states; later passes read shifted versions of those memories, giving each token access to deep-layer information from previous token positions while preserving parallel training.
 
+> **Project status (August 2026).** On August 9, 2026, Wang et al. published
+> [*Full-bandwidth transformer*](https://arxiv.org/abs/2608.08888). The paper
+> independently develops the central multi-pass latent-feedback idea explored
+> here and validates it at much larger scale. It has stronger benchmarks and a
+> much fuller analysis. If this repository interests you, read their paper
+> first. I am delighted to see the idea work in the big leagues. This
+> repository remains a small testbed for explicit memory-tape variants and
+> controlled state-tracking experiments.
+
 ## A Motivating Problem: State Tracking
 
 Transformers often struggle with algorithmic state tracking (see, for example, [Li25](https://arxiv.org/abs/2503.02854)), which is why related tasks appear in challenging benchmarks such as BBH (see [Suzgun22](https://arxiv.org/abs/2210.09261)). Transformers have difficulties tracking an increasing number of sequential state changes. The $S_5$ permutation task, for example, looks like "[A,B,C,D,E] swap 1 2 [B,A,C,D,E]".
