@@ -24,6 +24,7 @@ class TraceTask:
     build_batch_fn: Callable
     generation_metrics_fn: Callable
     format_metrics_fn: Callable
+    build_eval_batches_fn: Callable | None = None
 
     def build_vocab(self, args):
         return self.build_vocab_fn(args)
@@ -39,6 +40,12 @@ class TraceTask:
 
     def format_metrics(self, metrics: dict[str, float]) -> str:
         return self.format_metrics_fn(metrics)
+
+    def build_eval_batches(self, args, stoi, *, split: str):
+        if self.build_eval_batches_fn is None:
+            return None
+        return self.build_eval_batches_fn(args, stoi, split)
+
 
 def _othello_vocab(args):
     return othello.build_othello_vocab(
@@ -77,25 +84,62 @@ def _othello_metrics(model, batch, args, inference_mode: str | None):
     )
 
 
+def _bind_shortest_path_dataset(args):
+    data_dir = getattr(args, "shortest_path_data_dir", None)
+    if not data_dir:
+        raise ValueError("shortest_path requires --shortest-path-data-dir")
+    bundle = shortest_path.load_shortest_path_bundle(data_dir)
+    saved_id = getattr(args, "shortest_path_dataset_id", None)
+    if saved_id is not None and saved_id != bundle.dataset_id:
+        raise ValueError(
+            "shortest-path dataset ID mismatch: saved run uses "
+            f"{saved_id}, but {bundle.directory} contains {bundle.dataset_id}"
+        )
+    saved_distribution = getattr(args, "shortest_path_distribution", None)
+    if (
+        saved_distribution is not None
+        and saved_distribution != bundle.distribution_name
+    ):
+        raise ValueError(
+            "shortest-path distribution mismatch: saved run uses "
+            f"{saved_distribution}, but the dataset contains "
+            f"{bundle.distribution_name}"
+        )
+    args.shortest_path_data_dir = str(bundle.directory)
+    args.shortest_path_distribution = bundle.distribution_name
+    args.shortest_path_dataset_id = bundle.dataset_id
+    return bundle
+
+
 def _shortest_path_vocab(args):
-    return shortest_path.build_shortest_path_vocab(
-        args.shortest_path_distribution
-    )
+    bundle = _bind_shortest_path_dataset(args)
+    return shortest_path.build_shortest_path_vocab(bundle.directory)
 
 
 def _shortest_path_block_size(args) -> int:
-    return shortest_path.required_block_size(
-        args.shortest_path_distribution
+    bundle = _bind_shortest_path_dataset(args)
+    return shortest_path.required_block_size(bundle.directory)
+
+
+def _shortest_path_batch(args, _stoi, rng: random.Random, split: str):
+    bundle = _bind_shortest_path_dataset(args)
+    return shortest_path.build_shortest_path_batch(
+        batch_size=args.batch_size,
+        shortest_path_data_dir=bundle.directory,
+        split=split,
+        device=args.device,
+        rng=rng,
     )
 
 
-def _shortest_path_batch(args, stoi, rng: random.Random, _split: str):
-    return shortest_path.build_shortest_path_batch(
+def _shortest_path_eval_batches(args, _stoi, split: str):
+    bundle = _bind_shortest_path_dataset(args)
+    return shortest_path.build_shortest_path_eval_batches(
         batch_size=args.batch_size,
-        distribution_name=args.shortest_path_distribution,
-        stoi=stoi,
+        num_batches=args.eval_batches,
+        shortest_path_data_dir=bundle.directory,
+        split=split,
         device=args.device,
-        rng=rng,
     )
 
 
@@ -172,6 +216,7 @@ TRACE_TASKS: dict[str, TraceTask] = {
         build_batch_fn=_shortest_path_batch,
         generation_metrics_fn=_shortest_path_metrics,
         format_metrics_fn=shortest_path_eval.format_metrics,
+        build_eval_batches_fn=_shortest_path_eval_batches,
     ),
 }
 

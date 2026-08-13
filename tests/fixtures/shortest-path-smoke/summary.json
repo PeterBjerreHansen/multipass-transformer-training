@@ -1,0 +1,94 @@
+{
+  "accepted_count": 48,
+  "candidate_count": 768,
+  "dataset_id": "bd0e094a4b3180300afb12e9c4ba85556f72c0a7c428a2db4f3db3af971d4aa4",
+  "duplicate_rejections": 0,
+  "filled_quota_rejections": 0,
+  "splits": {
+    "test": {
+      "count": 8,
+      "edge_count": {
+        "max": 13,
+        "mean": 10.5,
+        "min": 9
+      },
+      "node_counts": {
+        "10": 3,
+        "11": 1,
+        "8": 4
+      },
+      "path_length_counts": {
+        "3": 4,
+        "4": 4
+      },
+      "prompt_length": {
+        "max": 44,
+        "mean": 38.125,
+        "min": 34
+      },
+      "sequence_length": {
+        "max": 49,
+        "mean": 43.625,
+        "min": 40
+      }
+    },
+    "train": {
+      "count": 32,
+      "edge_count": {
+        "max": 16,
+        "mean": 11.6875,
+        "min": 7
+      },
+      "node_counts": {
+        "10": 7,
+        "11": 5,
+        "12": 6,
+        "8": 6,
+        "9": 8
+      },
+      "path_length_counts": {
+        "3": 16,
+        "4": 16
+      },
+      "prompt_length": {
+        "max": 52,
+        "mean": 41.28125,
+        "min": 31
+      },
+      "sequence_length": {
+        "max": 57,
+        "mean": 46.78125,
+        "min": 36
+      }
+    },
+    "validation": {
+      "count": 8,
+      "edge_count": {
+        "max": 18,
+        "mean": 11.125,
+        "min": 7
+      },
+      "node_counts": {
+        "10": 2,
+        "11": 1,
+        "12": 2,
+        "8": 2,
+        "9": 1
+      },
+      "path_length_counts": {
+        "3": 4,
+        "4": 4
+      },
+      "prompt_length": {
+        "max": 56,
+        "mean": 40.25,
+        "min": 30
+      },
+      "sequence_length": {
+        "max": 62,
+        "mean": 45.75,
+        "min": 35
+      }
+    }
+  }
+}

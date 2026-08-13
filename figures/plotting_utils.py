@@ -108,6 +108,8 @@ def _config_context(run_dir: Path, *, root: Path | None = None) -> dict:
         "max_level": args.get("max_level"),
         "curriculum_threshold": args.get("curriculum_threshold"),
         "shortest_path_distribution": args.get("shortest_path_distribution"),
+        "shortest_path_data_dir": args.get("shortest_path_data_dir"),
+        "shortest_path_dataset_id": args.get("shortest_path_dataset_id"),
         "maze_data_dir": args.get("maze_data_dir"),
         "maze_route_policy": args.get("maze_route_policy"),
         "total_parameters": model_stats.get("total_parameters"),

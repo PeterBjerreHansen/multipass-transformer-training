@@ -1,0 +1,62 @@
+{
+  "block_size": 69,
+  "compiled_format_version": 1,
+  "dataset_id": "bd0e094a4b3180300afb12e9c4ba85556f72c0a7c428a2db4f3db3af971d4aa4",
+  "dataset_spec": {
+    "distribution": "easy",
+    "name": "smoke",
+    "root_seed": 20260813,
+    "test_count": 8,
+    "train_count": 32,
+    "validation_count": 8
+  },
+  "dataset_version": 1,
+  "distribution": {
+    "max_detour_penalty": 3,
+    "max_detours": 2,
+    "max_edge_probability": 0.25,
+    "max_nodes": 12,
+    "max_out_degree": 2,
+    "max_path_length": 4,
+    "min_detours": 1,
+    "min_edge_probability": 0.05,
+    "min_nodes": 8,
+    "min_path_length": 3,
+    "name": "easy"
+  },
+  "length_dtype": "uint8",
+  "max_sequence_length": 70,
+  "special_token_ids": {
+    "bos": 1,
+    "eos": 3,
+    "pad": 0,
+    "sep": 2
+  },
+  "splits": {
+    "test": {
+      "count": 8,
+      "example_ids": "test_example_ids.npy",
+      "prompt_lengths": "test_prompt_lengths.npy",
+      "sequence_lengths": "test_sequence_lengths.npy",
+      "tokens": "test_tokens.npy"
+    },
+    "train": {
+      "count": 32,
+      "example_ids": "train_example_ids.npy",
+      "prompt_lengths": "train_prompt_lengths.npy",
+      "sequence_lengths": "train_sequence_lengths.npy",
+      "tokens": "train_tokens.npy"
+    },
+    "validation": {
+      "count": 8,
+      "example_ids": "validation_example_ids.npy",
+      "prompt_lengths": "validation_prompt_lengths.npy",
+      "sequence_lengths": "validation_sequence_lengths.npy",
+      "tokens": "validation_tokens.npy"
+    }
+  },
+  "task": "shortest_path",
+  "token_dtype": "uint8",
+  "vocab": "vocab.json",
+  "vocab_size": 20
+}

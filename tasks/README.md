@@ -10,7 +10,7 @@ The repository uses two task families:
 | Family | Supervision | Difficulty | Tasks |
 | --- | --- | --- | --- |
 | BBH curriculum | Predict the final answer | Increases after validation accuracy reaches 95% | `permutation`, `tracking`, `pointer_chasing`, `state_machine` |
-| Trace generation | Generate the full target suffix | Drawn from the selected preset distribution | `othello`, `shortest_path`, `maze` |
+| Trace generation | Generate the full target suffix | Sampled from the selected finite dataset | `othello`, `shortest_path`, `maze` |
 
 ### BBH curriculum tasks
 
@@ -30,8 +30,9 @@ without giving the model an intermediate trace.
 
 - `othello` generates legal move sequences from the standard initial board.
   Evaluation measures continuation legality and legal-set probability.
-- `shortest_path` presents a shuffled directed acyclic graph with one shortest
-  route. The model generates the complete route from the given start to goal.
+- `shortest_path` reads finite, memory-mapped datasets of shuffled directed
+  acyclic graphs with one shortest route. The model generates the complete
+  route from the given start to goal.
 - `maze` uses finite Searchformer-style random-wall datasets. The model
   generates a cell path or an action sequence.
 
@@ -39,21 +40,36 @@ Trace tasks test long autoregressive continuations. Multi-pass checkpoints can
 run with exact `recompute` inference or approximate `append_recurrent`
 inference.
 
-## Shortest-path distributions
+## Shortest-path data
 
-The generator permutes node labels and shuffles graph edges for each example.
-It verifies that each graph has exactly one shortest route.
+The explicit dataset builder permutes node labels and shuffles graph edges for
+each example. It verifies that each graph has exactly one shortest route,
+balances route lengths within every split, and rejects duplicate labeled graph
+problems across train, validation, and test.
 
 | Preset | Nodes | Route length | Maximum out-degree | Longer alternatives |
 | --- | ---: | ---: | ---: | ---: |
 | `shortest_path_easy` | 8-12 | 3-4 edges | 2 | 1-2 |
 | `shortest_path_main` | 16-26 | 5-10 edges | 2 | 4-6 |
 
-The main distribution samples route length before graph size. This keeps all
-route lengths feasible and approximately balanced.
+The main builder selects route length before graph size. This keeps all route
+lengths feasible and exactly balanced to within one example per split.
 
-Shortest-path evaluation reports exact optimal-route accuracy. It also reports
-accuracy for each generated transition.
+Generate the ignored full artifacts from the repository root:
+
+```bash
+python3 -m tasks.trace.shortest_path_data generate \
+  --dataset main --output-dir data/shortest_path/main --workers 8
+python3 -m tasks.trace.shortest_path_data generate \
+  --dataset easy --output-dir data/shortest_path/easy --workers 8
+```
+
+Training samples the finite `train` split with replacement. Checkpoint
+selection and diagnostics use deterministic validation examples; post-training
+`eval_trace` uses deterministic test examples. Shortest-path evaluation reports
+exact optimal-route accuracy and accuracy for each generated transition. See
+[`trace/shortest_path_data.md`](trace/shortest_path_data.md) for the complete
+artifact and verification contract.
 
 ## Maze data
 

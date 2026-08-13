@@ -91,7 +91,8 @@ def evaluate_run(cli_args) -> Path:
     checkpoint = load_checkpoint_payload(checkpoint_path, device="cpu")
     block_size, vocab, stoi, _itos, model, _optimizer = build_training_objects(args)
     restore_checkpoint_state(checkpoint, model=model, optimizer=None, device=args.device)
-    batches = build_fixed_eval_batches(args, stoi)
+    evaluated_split = "test" if args.task == "shortest_path" else "val"
+    batches = build_fixed_eval_batches(args, stoi, split=evaluated_split)
 
     set_seed(cli_args.seed)
     metrics = evaluate_prebuilt_batches(
@@ -125,6 +126,9 @@ def evaluate_run(cli_args) -> Path:
         "evaluation_examples": sum(int(batch.idx.shape[0]) for batch in batches),
         "metrics": metrics,
     }
+    if args.task == "shortest_path":
+        summary["dataset_split"] = evaluated_split
+        summary["shortest_path_dataset_id"] = args.shortest_path_dataset_id
     write_json(summary_path, summary)
 
     print(

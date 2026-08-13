@@ -119,12 +119,12 @@ def test_symbolic_task_batches_follow_shared_contract(tmp_path):
         )
 
     distribution_vocab = shortest_path.build_shortest_path_vocab(
-        "main"
+        shortest_path.DEFAULT_SMOKE_DATA_DIR
     )
     distribution_batch = shortest_path.build_shortest_path_batch(
         batch_size=3,
-        distribution_name="main",
-        stoi=distribution_vocab[1],
+        shortest_path_data_dir=shortest_path.DEFAULT_SMOKE_DATA_DIR,
+        split="train",
         device="cpu",
         rng=random.Random(2028),
     )
@@ -132,7 +132,9 @@ def test_symbolic_task_batches_follow_shared_contract(tmp_path):
         distribution_batch,
         stoi=distribution_vocab[1],
         vocab_size=len(distribution_vocab[0]),
-        required_block_size=shortest_path.required_block_size("main"),
+        required_block_size=shortest_path.required_block_size(
+            shortest_path.DEFAULT_SMOKE_DATA_DIR
+        ),
     )
 
     for input_representation in maze.INPUT_REPRESENTATIONS:

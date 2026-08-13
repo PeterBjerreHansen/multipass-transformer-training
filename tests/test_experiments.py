@@ -385,15 +385,24 @@ def test_cli_has_only_two_inference_modes_and_no_cache_source():
     assert not hasattr(args, "memory_tape_gate")
 
 
-def test_shortest_path_cli_exposes_only_easy_and_main_distributions():
+def test_shortest_path_cli_selects_compiled_datasets_without_distribution_knob():
     main = parse_trace_args(["--preset", "shortest_path_main"])
     easy = parse_trace_args(["--preset", "shortest_path_easy"])
     smoke = parse_trace_args(["--preset", "shortest_path_smoke"])
-    assert main.shortest_path_distribution == "main"
-    assert easy.shortest_path_distribution == "easy"
+    assert main.shortest_path_data_dir == shortest_path.DEFAULT_DATA_DIR
+    assert easy.shortest_path_data_dir == shortest_path.DEFAULT_EASY_DATA_DIR
     assert easy.train_steps == 50_000
     assert main.train_steps == 200_000
-    assert smoke.shortest_path_distribution == "easy"
+    assert smoke.shortest_path_data_dir == shortest_path.DEFAULT_SMOKE_DATA_DIR
+    with pytest.raises(SystemExit):
+        parse_trace_args(
+            [
+                "--preset",
+                "shortest_path_main",
+                "--shortest-path-distribution",
+                "easy",
+            ]
+        )
     with pytest.raises(SystemExit):
         parse_trace_args(
             [
@@ -474,7 +483,7 @@ def test_main_presets_use_declared_experiment_scales():
     assert othello_main["eval_interval"] == 5_000
 
     path = TRACE_PRESETS["shortest_path_main"].values
-    assert path["shortest_path_distribution"] == "main"
+    assert path["shortest_path_data_dir"] == shortest_path.DEFAULT_DATA_DIR
     assert not any(
         key in path
         for key in (
@@ -484,8 +493,8 @@ def test_main_presets_use_declared_experiment_scales():
             "distractor_edges",
         )
     )
-    assert shortest_path.required_block_size("easy") == 69
-    assert shortest_path.required_block_size("main") == 145
+    assert shortest_path.generation_block_size("easy") == 69
+    assert shortest_path.generation_block_size("main") == 145
 
 
 def test_othello_prefix_examples_and_legal_set_metrics_are_deterministic():
@@ -658,7 +667,7 @@ def test_main_trace_preset_contract_is_frozen():
             "lr_decay_steps": 200_000,
             "eval_interval": 5_000,
             "eval_batches": 4,
-            "shortest_path_distribution": "main",
+            "shortest_path_data_dir": shortest_path.DEFAULT_DATA_DIR,
         },
         "maze_main": {
             "task": "maze",

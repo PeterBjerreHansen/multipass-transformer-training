@@ -539,6 +539,9 @@ def diagnose_memory(cli_args) -> Path:
     }
     if bbh_level is not None:
         payload["evaluated_level"] = bbh_level
+    if args.task == "shortest_path":
+        payload["dataset_split"] = "validation"
+        payload["shortest_path_dataset_id"] = args.shortest_path_dataset_id
     output = Path(cli_args.output).resolve() if cli_args.output else run_dir / "diagnostics.json"
     write_json(output, payload)
     print(f"wrote {output}")

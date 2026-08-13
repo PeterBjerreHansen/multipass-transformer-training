@@ -129,6 +129,8 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
                     "device": "cpu",
                     "n_pass": 4,
                     "shortest_path_distribution": "main",
+                    "shortest_path_data_dir": "data/shortest_path/main",
+                    "shortest_path_dataset_id": "a" * 64,
                 },
                 "model_stats": {
                     "total_parameters": 1200,
@@ -245,6 +247,8 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
 
     training = load_training_records(tmp_path)
     assert training[0]["shortest_path_distribution"] == "main"
+    assert training[0]["shortest_path_data_dir"] == "data/shortest_path/main"
+    assert training[0]["shortest_path_dataset_id"] == "a" * 64
     assert training[0]["pass_4_loss"] == 1.4
     assert training[0]["gradient_memory_writer_mean"] == 0.2
     figure, axis = plt.subplots()

@@ -71,11 +71,7 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-embd", type=int)
     _add_override(parser, "--n-pass", type=int)
     _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
-    _add_override(
-        parser,
-        "--shortest-path-distribution",
-        choices=["easy", "main"],
-    )
+    _add_override(parser, "--shortest-path-data-dir")
     _add_override(parser, "--maze-data-dir")
     _add_override(
         parser,
@@ -152,9 +148,16 @@ def build_task_batch(args, stoi, rng: random.Random, *, split: str):
     return get_trace_task(args.task).build_batch(args, stoi, rng, split=split)
 
 
-def build_fixed_eval_batches(args, stoi):
+def build_fixed_eval_batches(args, stoi, *, split: str = "val"):
+    task = get_trace_task(args.task)
+    compiled_batches = task.build_eval_batches(args, stoi, split=split)
+    if compiled_batches is not None:
+        return compiled_batches
     rng = random.Random(stable_seed(args.seed, "trace", args.task, "eval"))
-    return [build_task_batch(args, stoi, rng, split="val") for _ in range(args.eval_batches)]
+    return [
+        build_task_batch(args, stoi, rng, split=split)
+        for _ in range(args.eval_batches)
+    ]
 
 
 def trace_generation_metrics(model, batch, args, *, inference_mode: str | None = None):
@@ -216,11 +219,14 @@ def run_trace_training(args) -> None:
     validate_training_args(args)
     validate_task_args(args)
     block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
+    extra_config = {"script": "experiments.train_trace"}
+    if args.task == "shortest_path":
+        extra_config["training_evaluation_split"] = "validation"
     artifacts = prepare_run_artifacts(
         args,
         model=model,
         default_root_parts=("trace", args.task, args.architecture),
-        extra_config={"script": "experiments.train_trace"},
+        extra_config=extra_config,
     )
 
     train_rng = random.Random(stable_seed(args.seed, "trace", args.task, "train"))
@@ -254,18 +260,18 @@ def run_trace_training(args) -> None:
         total_weight = sum(args.pass_loss_weights)
         print(f"n_pass: {args.n_pass}")
         print(f"pass_loss_weights_normalized: {[weight / total_weight for weight in args.pass_loss_weights]}")
-    append_jsonl(
-        artifacts.metrics_path,
-        {
-            "event": "run_start" if checkpoint is None else "run_resume",
-            "step": resume_step,
-            "task": args.task,
-            "architecture": args.architecture,
-            "provenance": provenance_metadata(),
-            "config": vars(args),
-            "model_stats": model_benchmark_stats(model),
-        },
-    )
+    run_event = {
+        "event": "run_start" if checkpoint is None else "run_resume",
+        "step": resume_step,
+        "task": args.task,
+        "architecture": args.architecture,
+        "provenance": provenance_metadata(),
+        "config": vars(args),
+        "model_stats": model_benchmark_stats(model),
+    }
+    if args.task == "shortest_path":
+        run_event["dataset_split"] = "validation"
+    append_jsonl(artifacts.metrics_path, run_event)
 
     fixed_eval_batches = build_fixed_eval_batches(args, stoi)
     start_step = resume_step + 1
@@ -323,23 +329,23 @@ def run_trace_training(args) -> None:
         if is_best_checkpoint:
             best_eval_loss = eval_loss
             best_eval_step = step
-        append_jsonl(
-            artifacts.metrics_path,
-            {
-                "event": "eval",
-                "step": step,
-                "learning_rate": current_lr,
-                "train_loss": float(loss.item()),
-                "pass_losses": [float(item.item()) for item in pass_losses],
-                "metrics": metrics,
-                "gradient_norms": gradient_summary,
-                "train_tok_per_s": tok_per_s,
-                "resource_stats": runtime_resource_stats(args.device),
-                "is_best_checkpoint": is_best_checkpoint,
-                "best_eval_loss": best_eval_loss,
-                "best_eval_step": best_eval_step,
-            },
-        )
+        eval_event = {
+            "event": "eval",
+            "step": step,
+            "learning_rate": current_lr,
+            "train_loss": float(loss.item()),
+            "pass_losses": [float(item.item()) for item in pass_losses],
+            "metrics": metrics,
+            "gradient_norms": gradient_summary,
+            "train_tok_per_s": tok_per_s,
+            "resource_stats": runtime_resource_stats(args.device),
+            "is_best_checkpoint": is_best_checkpoint,
+            "best_eval_loss": best_eval_loss,
+            "best_eval_step": best_eval_step,
+        }
+        if args.task == "shortest_path":
+            eval_event["dataset_split"] = "validation"
+        append_jsonl(artifacts.metrics_path, eval_event)
         checkpoint_extra = {
             "train_rng_state": train_rng.getstate(),
             "best_eval_loss": best_eval_loss,

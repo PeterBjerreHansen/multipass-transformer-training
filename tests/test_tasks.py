@@ -288,7 +288,7 @@ def test_othello_generation_is_partition_invariant():
 def test_shortest_path_distributions_are_varied_permuted_and_solver_verified():
     for distribution_name in ("easy", "main"):
         distribution = shortest_path.get_shortest_path_distribution(distribution_name)
-        _vocab, stoi, _itos = shortest_path.build_shortest_path_vocab(
+        _vocab, stoi, _itos = shortest_path.build_generation_vocab(
             distribution_name
         )
         first_rng = random.Random(714)
@@ -352,7 +352,7 @@ def test_shortest_path_distributions_are_varied_permuted_and_solver_verified():
 
 
 def test_shortest_path_main_uniformly_mixes_feasible_path_lengths():
-    _vocab, stoi, _itos = shortest_path.build_shortest_path_vocab("main")
+    _vocab, stoi, _itos = shortest_path.build_generation_vocab("main")
     rng = random.Random(1337)
     path_length_counts = {path_length: 0 for path_length in range(5, 11)}
     for _ in range(6_000):
@@ -400,11 +400,13 @@ def test_shortest_path_label_permutation_preserves_the_solution():
 
 
 def test_shortest_path_step_accuracy_excludes_the_supplied_start_node():
-    _vocab, stoi, _itos = shortest_path.build_shortest_path_vocab("main")
+    _vocab, stoi, _itos = shortest_path.build_shortest_path_vocab(
+        shortest_path.DEFAULT_SMOKE_DATA_DIR
+    )
     batch = shortest_path.build_shortest_path_batch(
         batch_size=1,
-        distribution_name="main",
-        stoi=stoi,
+        shortest_path_data_dir=shortest_path.DEFAULT_SMOKE_DATA_DIR,
+        split="validation",
         device="cpu",
         rng=random.Random(19),
     )
@@ -427,7 +429,7 @@ def test_shortest_path_step_accuracy_excludes_the_supplied_start_node():
             architecture="transformer",
             inference_mode="recompute",
             token_selection="argmax",
-            shortest_path_distribution="main",
+            shortest_path_distribution="easy",
         ),
     )
     assert "path_step_0_accuracy" not in metrics
@@ -439,12 +441,12 @@ def test_shortest_path_step_accuracy_excludes_the_supplied_start_node():
 def test_shortest_path_easy_example_can_be_overfit_and_generated():
     torch.manual_seed(123)
     vocab, stoi, _itos = shortest_path.build_shortest_path_vocab(
-        "easy"
+        shortest_path.DEFAULT_SMOKE_DATA_DIR
     )
     batch = shortest_path.build_shortest_path_batch(
         batch_size=1,
-        distribution_name="easy",
-        stoi=stoi,
+        shortest_path_data_dir=shortest_path.DEFAULT_SMOKE_DATA_DIR,
+        split="train",
         device="cpu",
         rng=random.Random(17),
     )

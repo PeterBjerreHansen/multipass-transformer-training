@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from tasks.bbh import permutation, pointer_chasing, state_machine, tracking
-from tasks.trace import maze, othello
+from tasks.trace import maze, othello, shortest_path
 
 
 @dataclass(frozen=True)
@@ -126,7 +126,7 @@ shortest_path_main = _trace_defaults(
     token_selection="argmax",
 )
 shortest_path_main.update(
-    shortest_path_distribution="main",
+    shortest_path_data_dir=shortest_path.DEFAULT_DATA_DIR,
     train_steps=200_000,
     lr=5e-4,
     lr_schedule="warmup_cosine",
@@ -135,7 +135,7 @@ shortest_path_main.update(
     lr_decay_steps=200_000,
 )
 TRACE_PRESETS["shortest_path_main"] = ExperimentPreset(
-    "Main mixed-difficulty, solver-verified shortest-path distribution.",
+    "Main mixed-difficulty, solver-verified shortest-path dataset.",
     shortest_path_main,
 )
 
@@ -145,10 +145,10 @@ shortest_path_easy = _trace_defaults(
     token_selection="argmax",
 )
 shortest_path_easy.update(
-    shortest_path_distribution="easy",
+    shortest_path_data_dir=shortest_path.DEFAULT_EASY_DATA_DIR,
 )
 TRACE_PRESETS["shortest_path_easy"] = ExperimentPreset(
-    "Full training setup for the easy shortest-path distribution.",
+    "Full training setup for the easy shortest-path dataset.",
     shortest_path_easy,
 )
 
@@ -158,10 +158,10 @@ shortest_path_smoke = _trace_defaults(
     token_selection="argmax",
 )
 shortest_path_smoke.update(
-    shortest_path_distribution="easy",
+    shortest_path_data_dir=shortest_path.DEFAULT_SMOKE_DATA_DIR,
 )
 TRACE_PRESETS["shortest_path_smoke"] = ExperimentPreset(
-    "One-step software check using the easy shortest-path distribution.",
+    "One-step software check using the compiled shortest-path fixture.",
     shortest_path_smoke,
 )
 

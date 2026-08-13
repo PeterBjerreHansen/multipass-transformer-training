@@ -125,6 +125,7 @@ def test_trace_training_evaluation_and_diagnostics_cli(tmp_path):
     trace_events = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
     trace_evaluation = next(event for event in trace_events if event["event"] == "eval")
     assert trace_evaluation["gradient_norms"]["global"]["mean"] > 0
+    assert trace_evaluation["dataset_split"] == "validation"
 
     eval_dir = tmp_path / "eval"
     _run(
@@ -142,6 +143,8 @@ def test_trace_training_evaluation_and_diagnostics_cli(tmp_path):
     assert summary["effective_inference_mode"] == "append_recurrent"
     assert summary["eval_batches"] == 1
     assert summary["evaluation_examples"] == 1
+    assert summary["dataset_split"] == "test"
+    assert len(summary["shortest_path_dataset_id"]) == 64
     assert "path_step_1_accuracy" in summary["metrics"]
 
 
@@ -241,6 +244,11 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
     ]
     evaluation = next(event for event in events if event["event"] == "eval")
     assert evaluation["learning_rate"] == pytest.approx(1e-4)
+    assert evaluation["dataset_split"] == "validation"
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["training_evaluation_split"] == "validation"
+    assert config["args"]["shortest_path_distribution"] == "easy"
+    assert len(config["args"]["shortest_path_dataset_id"]) == 64
     for metric in (
         "optimal_path",
         "optimal_path_short",
@@ -306,6 +314,11 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
         assert summary["task"] == "shortest_path"
         assert summary["checkpoint"] == "latest"
         assert summary["checkpoint_step"] == 2
+        assert summary["dataset_split"] == "test"
+        assert (
+            summary["shortest_path_dataset_id"]
+            == config["args"]["shortest_path_dataset_id"]
+        )
         assert "optimal_path" in summary["metrics"]
 
     diagnostics = tmp_path / "shortest_path_diagnostics.json"
@@ -324,6 +337,11 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
     assert payload["task"] == "shortest_path"
     assert payload["checkpoint"] == "latest"
     assert payload["checkpoint_step"] == 2
+    assert payload["dataset_split"] == "validation"
+    assert (
+        payload["shortest_path_dataset_id"]
+        == config["args"]["shortest_path_dataset_id"]
+    )
     assert payload["teacher_forced_schedule_gap"]["overall"]["count"] > 0
 
 
