@@ -7,7 +7,7 @@ source "${ROOT}/scripts/lib/model_matrix.sh"
 
 # task options: permutation tracking pointer_chasing state_machine
 TASKS="${TASKS:-permutation tracking pointer_chasing state_machine}"
-SEEDS="${SEEDS:-${SEED:-1337}}"
+SEEDS="${SEEDS:-${SEED:-1337 2027}}"
 # architecture options: transformer memory_tape memory_add
 ARCHITECTURES="${ARCHITECTURES:-transformer memory_tape memory_add}" # default
 RESULT_ROOT="${RESULT_ROOT:-results/bbh}"

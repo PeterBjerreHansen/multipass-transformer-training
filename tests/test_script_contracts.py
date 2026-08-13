@@ -60,7 +60,7 @@ def test_canonical_training_launchers_do_not_accept_scientific_overrides():
             assert variable not in text, f"{launcher} accepts scientific override {variable}"
 
     trace_text = launchers[1].read_text(encoding="utf-8")
-    assert 'TASKS="${TASKS:-shortest_path}"' in trace_text
+    assert 'TASKS="${TASKS:-maze}"' in trace_text
     assert (
         'ARCHITECTURES="${ARCHITECTURES:-transformer memory_tape memory_add}"'
         in trace_text

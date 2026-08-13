@@ -601,12 +601,12 @@ def test_main_bbh_preset_contract_is_frozen():
         },
         "tracking_main": {
             "task": "tracking",
-            "num_objects": 4,
+            "num_objects": 5,
             "curriculum_start_level": 1,
         },
         "permutation_main": {
             "task": "permutation",
-            "num_objects": 4,
+            "num_objects": 5,
             "curriculum_start_level": 1,
         },
         "state_machine_main": {

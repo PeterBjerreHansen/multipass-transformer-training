@@ -2,7 +2,10 @@
 and predict the final arrangement.
 
 Example sequence:
-<bos> o0 o1 o2 o3 swap p0 p2 swap p1 p3 <sep> o2 o3 o0 o1 <eos>
+<bos> o0 o1 o2 o3 o4 swap p0 p2 swap p1 p3 <sep> o2 o3 o0 o1 o4 <eos>
+
+With the default five objects, repeated arbitrary transpositions generate the
+symmetric group S_5.
 """
 
 from typing import Dict, List, Tuple
@@ -22,7 +25,7 @@ from tasks.common import (
 
 
 SWAP_TOKEN = "swap"
-DEFAULT_NUM_OBJECTS = 4
+DEFAULT_NUM_OBJECTS = 5
 
 
 def obj_token(index: int) -> str:

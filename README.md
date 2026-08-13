@@ -4,11 +4,11 @@ This project explores a way to train transformers for recurrent-style inference 
 
 ## A Motivating Problem: State Tracking
 
-Transformers often struggle with algorithmic state tracking (see, for example, [Li25](https://arxiv.org/abs/2503.02854)), which is why related tasks appear in challenging benchmarks such as BBH (see [Suzgun22](https://arxiv.org/abs/2210.09261)). Here, we use four BBH-inspired tasks to test whether a small transformer can learn to update a symbolic state repeatedly.
+Transformers often struggle with algorithmic state tracking (see, for example, [Li25](https://arxiv.org/abs/2503.02854)), which is why related tasks appear in challenging benchmarks such as BBH (see [Suzgun22](https://arxiv.org/abs/2210.09261)). Transformers have difficulties tracking an increasing number of sequential state changes. The $S_5$ permutation task, for example, looks like "[A,B,C,D,E] swap 1 2 [B,A,C,D,E]".
 
 ![](figures/bbh_curriculum_fig.png "BBH")
 
-The models learn these tasks by tracking an increasing number of state changes. The permutation task, for example, looks like "[A,B,C,D] swap 1 2 [B,A,C,D]". We predict only the final state and increase the number of swaps once validation accuracy exceeds 95%. For these experiments, the baseline transformer and multi-pass models use the `small` preset: 4 layers, 4 attention heads, and 128 embedding dimensions. The baseline is intentionally depth-constrained, while the multi-pass models can reuse a shifted memory tape across recurrent passes. The baseline's learned number of state changes therefore flattens in a way that multi-pass training alleviates.
+In my implementation models predict only the final state and the number of swaps is increased once validation accuracy exceeds 95%. For these experiments, the baseline transformer and multi-pass models use the `small` preset: 4 layers, 4 attention heads, and 128 embedding dimensions. The baseline is intentionally depth-constrained, while the multi-pass models can reuse a shifted memory tape across recurrent passes. The baseline's learned number of state changes therefore flattens in a way that multi-pass training alleviates.
 
 ## A Theoretical Motivation
 
@@ -113,22 +113,13 @@ That is why the repo also includes longer-range trace tasks. These are fixed-tra
 
 ![](figures/trace_plot_figs.png "trace")
 
-The plot above comes from an earlier architecture sweep. Some plotted variants
-are now preserved on the `archived-architectures` branch rather than supported
-on `main`. The current models still need a matched rerun under both `recompute`
-and `append_recurrent` before the figure is updated.
+The plot above comes from an earlier architecture sweep. Some plotted variants are now preserved on the `archived-architectures` branch rather than supported on `main`. The current models still need a matched rerun under both `recompute` and `append_recurrent` before the figure is updated.
 
 ## Multi-pass Architectures
 
-`main` supports two multi-pass memory designs. Both use the shared training and
-inference methods implemented by `MultiPassTransformer`.
+`main` supports two multi-pass memory designs. Both use the shared training and inference methods implemented by `MultiPassTransformer`.
 
-The notation in this section is tensor-level: $X$ is the token-embedding
-stream, $M^{(k)}$ is the full tape written at pass $k$, and
-$R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared
-wrapper performs the shift, final normalization, language-model head, and
-memory write. Each model defines only the decoder mapping $(X,R)$ to its
-pre-final hidden stream.
+The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full tape written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared wrapper performs the shift, final normalization, language-model head, and memory write. Each model defines only the decoder mapping $(X,R)$ to its pre-final hidden stream.
 
 ### Memory Through Attention: The MemoryTape Architecture
 
@@ -146,8 +137,7 @@ Causal cross-attention is applied over $R$ as a separately addressable key/value
 
 ### Residual Memory Fusion: The MemoryAdd Architecture
 
-MemoryAdd keeps the ordinary token stream intact and learns a residual
-correction from the shifted recurrent tape:
+MemoryAdd keeps the ordinary token stream intact and learns a residual correction from the shifted recurrent tape:
 
 > **MemoryAdd decoder**
 >
@@ -157,201 +147,23 @@ correction from the shifted recurrent tape:
 
 ## Tasks
 
-The current experiments focus on algorithmic tasks featuring state-tracking where exactness is easy to measure and computational "depth" is required.
+The repository has two task families:
 
-### Task Families
+- BBH curriculum tasks predict one final answer. Their difficulty increases after validation accuracy reaches 95%.
+- Trace tasks generate a full suffix from a preset-defined distribution. They test long continuations under `recompute` and `append_recurrent` inference.
 
-Experiment entry points live under `experiments/`. Shared batching utilities live in `tasks/common.py`, BBH generators live under `tasks/bbh/`, trace generators live under `tasks/trace/`, and the shared runner helpers live in `experiments/common.py`. Tracked figure assets live under `figures/`; local plotting notebooks can also live there.
+Task generators and task-specific metrics live under `tasks/`. See [tasks/README.md](tasks/README.md) for the task catalogue, distributions, and evaluation definitions.
 
-The current experiment tasks are:
+## Running experiments
 
-- `pointer_chasing`: answer-only pointer composition on shuffled directed odd cycles. Level `L` uses the nested label set `n0` through `n(2L)` and asks for the node reached after exactly `L` transitions, so the seen vocabulary, graph size, and required composition depth grow together.
-- `state_machine`: per-example deterministic finite-state machines with balanced shuffled transition tables and action sequences.
-- `tracking`: shuffled-object tracking with swap, rotate, and reverse operations.
-- `permutation`: permutation composition by repeated swaps.
-- `othello`: legal Othello move-trace generation from the standard fixed board, evaluated by continuation legality and teacher-forced legal-set probability.
-- `shortest_path`: shuffled, node-permuted directed acyclic graphs with exactly one shortest route from the declared start to goal; the model generates the complete optimal node path. Its benchmark distributions are `easy` and `main`, and each varies graph size, route length, edge density, and detour shape from example to example.
-- `maze`: finite, compiled [Searchformer-style](https://arxiv.org/abs/2402.14083) random-wall datasets with sparse-cell or flattened dense-cell inputs, cell-path or action targets, and A*, uniform-shortest, or DFS route policies.
-
-The live experiment API is family-specific and preset-driven. `python3 -m experiments.train_bbh` runs the BBH-inspired tasks with final-answer-only supervision and curriculum promotions. `python3 -m experiments.train_trace` runs the trace tasks from named presets with fixed trace targets.
-
-Answer-only curriculum:
-
-```bash
-python3 -m experiments.train_bbh \
-  --preset pointer_chasing_main \
-  --architecture memory_tape \
-  --run-dir results/bbh/pointer_chasing/memory_tape/example_run
-```
-
-Trace training on `othello`:
-
-```bash
-python3 -m experiments.train_trace \
-  --preset othello_main \
-  --architecture memory_tape \
-  --run-dir results/trace/othello/main/memory_tape/example_run
-```
-
-Trace training on unique shortest paths:
-
-```bash
-python3 -m experiments.train_trace \
-  --preset shortest_path_main \
-  --architecture memory_tape \
-  --run-dir results/trace/shortest_path/main/memory_tape/example_run
-```
-
-Trace training on 10x10 random-wall mazes:
-
-```bash
-python3 -m experiments.train_trace \
-  --preset maze_main \
-  --architecture memory_tape \
-  --maze-data-dir data/maze/searchformer-10 \
-  --maze-input-representation sparse-cells \
-  --maze-target-representation cell-path \
-  --maze-route-policy astar \
-  --run-dir results/trace/maze/main/memory_tape/example_run
-```
-
-`maze_main` reads a finite, pre-tokenized dataset from
-`data/maze/searchformer-10`. It never generates or silently replaces missing
-maze data. Canonical mazes and compiled NumPy artifacts are created with the
-separate `maze-data-generator` repository. Compile the canonical data directly
-to the directory selected by `--maze-data-dir`, for example:
-
-```bash
-maze-data compile-all \
-  --input data/searchformer-10.jsonl \
-  --output-dir /path/to/multi_pass_transformer/data/maze/searchformer-10
-```
-
-The default rendering is:
-
-```text
-<height> 10 <width> 10 <start> r2c1 <goal> r8c7 <walls> r0c3 r1c4 ...
-<path> r2c1 r3c1 r3c2 ... r8c7
-```
-
-Each `r2c1`-style square is one vocabulary token. Walls are serialized in
-row-major order, and the cell path includes both endpoints.
-
-`--maze-input-representation dense-cells` instead flattens the complete grid:
-
-```text
-<height> 10 <width> 10 <grid> . . # . S . . # G . ...
-```
-
-`--maze-target-representation actions` replaces the cell path with moves from
-the supplied start:
-
-```text
-<actions> D R R U ...
-```
-
-The two inputs and two targets combine freely. `--maze-route-policy` selects
-`astar`, `uniform_shortest`, or `dfs`; each selection loads a separately
-compiled artifact over the same finite topology splits. A* and uniform routes
-are optimal. DFS stores its deterministic first-found simple path and may be
-longer.
-
-Each compiled artifact contains a manifest, vocabulary, maze IDs, sequence
-lengths, prompt lengths, and `uint16` token arrays for train, validation, and
-test. Arrays are loaded with NumPy memory mapping. The vocabulary comes from
-the artifact rather than being reconstructed inside this repository, and the
-manifest must match every requested representation and policy.
-
-Maze evaluation intentionally reports only:
-
-- `optimal_route`: the generated route is legal, reaches the goal, and has the
-  independently solved shortest length;
-- `exact_target_route`: the generated suffix exactly reproduces the selected
-  A*, uniform-shortest, or DFS target.
-
-For an A*-trained model, these metrics distinguish a different valid optimum
-from imitation of the deterministic A* route. No DFS exact-match metric is
-computed unless DFS is the selected target policy.
-
-`shortest_path_main` runs for 200,000 optimizer steps. Its learning rate warms
-linearly to `5e-4` over the first 4,000 steps, then decays by a cosine schedule
-to `1e-5` at step 200,000. The schedule is based on absolute optimizer steps,
-so checkpoint resumes continue the same curve.
-
-Shortest-path training and held-out evaluation always draw from the same named
-distribution. Evaluation reports exact optimal-path-plus-EOS accuracy under
-both `recompute` and `append_recurrent`. It also records realized graph
-connectivity, decision-point, relevant-edge, and random-policy baselines.
-Main-distribution accuracy is stratified into short (5–6 edges), medium (7–8),
-and long (9–10) paths. Free-generation accuracy is reported separately for
-every transition step; step 1 is the first move after the explicitly supplied
-start node. Graph edges are shuffled and
-node labels are independently permuted per example; the generator verifies
-that every serialized graph has exactly one shortest path.
-
-| Distribution | Nodes | Shortest-path edges | Maximum out-degree | Longer alternatives |
-| --- | ---: | ---: | ---: | ---: |
-| `easy` | 8–12 | 3–4 | 2 | 1–2 |
-| `main` | 16–26 | 5–10, sampled uniformly | 2 | 4–6 |
-
-For `main`, path length is sampled before graph size. The minimum graph size is
-then constrained to fit that path and four detours, so every path length is
-equally represented without impossible long-path/small-graph combinations.
-Every example therefore contains at least four genuine routing decisions, and
-the planted alternatives are only one or two edges longer. The number of
-serialized edges is deliberately not fixed. Background DAG edges are sampled
-at a randomized density and retained only when the planted answer remains the
-unique shortest path. Use `shortest_path_easy` for a full 50,000 step run on
-the easier distribution; the one-step `shortest_path_smoke` preset uses the
-same distribution with tiny software-test settings.
-
-Post-training trace evaluation:
-
-```bash
-RUN_DIR=results/trace/shortest_path/main/memory_tape/seed_1337 \
-DEVICE=mps \
-bash scripts/trace/eval.sh
-```
-
-The launcher reads the saved task and architecture from `config.json`.
-Shortest-path runs receive deterministic free-generation evaluation under
-each supported inference schedule on 4,096 fresh examples by default. Final
-evaluation and diagnostics use `best.pt`; set `CHECKPOINT=latest` to inspect
-the terminal training state instead. Othello runs receive full-game,
-random-prefix, and fixed-fraction continuation evaluation, including
-teacher-forced gold-move NLL, legal-set NLL, legal probability mass, top-1
-legality, and legal-set size. Transformer checkpoints evaluate only in
-`recompute`; multi-pass checkpoints are compared under both schedules.
-
-The available architectures are `transformer`, `memory_tape`, and `memory_add`.
-Earlier exploratory architectures are preserved on the
-`archived-architectures` branch.
-
-Each training run writes:
-
-- `config.json`
-- `metrics.jsonl`
-- `best.pt`
-- `latest.pt`
-
-A run directory belongs to one training history. Starting a new run in a
-non-empty directory fails; `--resume-from` continues that history, preserves
-its original `config.json`, and records the resumed command and Git state in
-`metrics.jsonl`.
-
-Run the main experiment matrices with:
+`main` supports `transformer`, `memory_tape`, and `memory_add`. The canonical launchers run preset-defined experiment matrices:
 
 ```bash
 bash scripts/bbh/run.sh
 bash scripts/trace/run.sh
 ```
 
-The folders under `scripts/` follow the two task classes used by the training
-code: `bbh/` for curriculum tasks and `trace/` for autoregressive trace tasks.
-The BBH launcher defaults to all four BBH tasks. The trace launcher defaults to
-the 200,000-step shortest-path main preset with `transformer`, `memory_tape`,
-and `memory_add`. Select another matrix
-matrix with `TASKS`, `ARCHITECTURES`, and `SEEDS`:
+Use environment variables to select tasks, architectures, seeds, the device, and the result root:
 
 ```bash
 DEVICE=mps \
@@ -362,119 +174,52 @@ RESULT_ROOT=results/trace \
 bash scripts/trace/run.sh
 ```
 
-This writes the three runs to
-`results/trace/shortest_path/main/<architecture>/seed_<seed>`. Canonical
-launchers take all scientific settings from their named presets. They permit
-only matrix selection and operational placement (`DEVICE` and `RESULT_ROOT`);
-they do not accept training, evaluation, task-difficulty, or
-model-hyperparameter overrides.
+Each run writes `config.json`, `metrics.jsonl`, `best.pt`, and `latest.pt`. A run directory contains one training history. Use `--resume-from` to continue that history.
 
-The BBH launcher supports all four tasks and all three architectures. Use
-`TASKS`, `ARCHITECTURES`, and `SEEDS` to select the matrix without changing
-any scientific preset. `SEEDS="1337 2027 4099"` expands independent
-repetitions without changing the preset.
+Use `tests/test_smoke.sh` for a quick end-to-end check. Use `tests/test_shortest_path.sh` for the complete shortest-path workflow check.
 
-Use `tests/test_smoke.sh` for quick end-to-end checks, or
-`tests/test_shortest_path.sh` for the complete shortest-path workflow check.
+## Evaluation and diagnostics
 
-Evaluation code follows the same separation as training:
-
-- `tasks/trace/othello_eval.py` defines Othello legality, legal-set loss, and
-  prefix-continuation summaries.
-- `tasks/trace/shortest_path_eval.py` defines optimal-path, path-length, and
-  per-step metrics.
-- `tasks/trace/maze_eval.py` verifies generated maze routes against the prompt
-  and scores any legal shortest path as optimal.
-- `experiments/eval_trace.py` is the shared checkpoint and batch runner for
-  ordinary trace evaluation.
-- `experiments/eval_othello_prefix.py` runs Othello's additional random-prefix
-  protocol.
-- `experiments/diagnose_memory.py` contains architecture diagnostics such as
-  interventions, pass dynamics, and schedule gap; these are intentionally not
-  task metrics.
-
-Trace-task evaluation:
+Evaluate a trained trace run with its task-specific metrics:
 
 ```bash
-python3 -m experiments.eval_trace \
-  --input-run-dir results/trace/shortest_path/main/memory_tape/example_run \
-  --inference-mode append_recurrent \
-  --token-selection argmax
+RUN_DIR=results/trace/shortest_path/main/memory_tape/seed_1337 \
+DEVICE=mps \
+bash scripts/trace/eval.sh
 ```
 
-The evaluator is post-training only. Each invocation evaluates one saved
-trace checkpoint under either `recompute` or `append_recurrent`, then writes
-`summary.json`.
+The launcher reads the task and architecture from `config.json`. It evaluates `best.pt` by default. Set `CHECKPOINT=latest` to evaluate the final training state.
 
-Standalone memory-use and pass-dynamics diagnostics:
+Run memory-use and pass-dynamics diagnostics separately:
 
 ```bash
 python3 -m experiments.diagnose_memory \
-  --input-run-dir results/trace/shortest_path/main/memory_tape/example_run \
+  --input-run-dir results/trace/shortest_path/main/memory_tape/seed_1337 \
   --extra-passes 6 \
   --schedule-gap-horizon 16
 ```
 
-The diagnostic report includes a teacher-forced `recompute` versus
-`append_recurrent` schedule-gap curve. It compares matched gold prefixes, so
-its per-position NLL, KL, prediction agreement, and memory-distance values
-measure schedule mismatch without free-generation errors as a confound.
+The report includes memory interventions, pass dynamics, schedule gap, and effective rank. Training logs also contain global and component gradient norms.
 
-Pass dynamics also report a relative $L_\infty$ fixed-point residual for the
-memory tape,
-$\lVert M^{(k)}-M^{(k-1)}\rVert_\infty /
-(\lVert M^{(k)}\rVert_\infty+\epsilon)$, alongside the existing logit KL.
-This adapts the per-example convergence signal used by
-[Fixed-Point Reasoners](https://arxiv.org/pdf/2606.18206v1) to the tape that is
-actually recurrent in these architectures. The normalization makes runs with
-different tape scales more comparable, while the infinity norm conservatively
-exposes the largest remaining coordinate change. Padding is excluded, and the
-report records the mean and maximum residual across examples.
+## Plotting notebooks
 
-Every default diagnostic run also reports the tape's effective rank. It is the
-exponential spectral entropy of the centered memory matrix, capped at 4,096
-sampled tape rows. This gives a scale-independent indication of whether the
-model uses many memory directions or collapses onto a low-dimensional state.
-It is descriptive rather than causal, so it should be read alongside the
-memory interventions rather than used alone as evidence that memory matters.
+The tracked, output-free notebooks under `figures/` read the current artifact schemas directly:
 
-Training `eval` events in `metrics.jsonl` also include rolling mean and maximum
-gradient norms for the global model, backbone, memory writer, and
-memory-specific attention parameters.
+- `01_bbh_curricula.ipynb` plots the $S_5$ permutation frontier and overall BBH curriculum coverage. It does not join loss across difficulty changes.
+- `02_trace_learning.ipynb` plots conventional fixed-difficulty learning curves and measured throughput for Othello and shortest path.
+- `03_deployment_and_othello.ipynb` compares paired `recompute` and `append_recurrent` quality, per-position free-generation drift, teacher-forced schedule gaps, and Othello random-prefix/legal-set metrics.
+- `04_ablation_diagnostics.ipynb` mirrors the merge-decision rules with paired seed deltas, quality–efficiency plots, memory interventions, extra-pass dynamics, and schedule-gap comparisons.
 
-### Plotting notebooks
-
-The tracked, output-free notebooks under `figures/` read the current artifact
-schemas directly:
-
-- `01_bbh_curricula.ipynb` plots BBH difficulty frontiers, per-level mastery
-  time, and end-of-budget curriculum coverage. It deliberately avoids joining
-  loss or accuracy across difficulty changes.
-- `02_trace_learning.ipynb` plots conventional fixed-difficulty learning curves
-  and measured throughput for Othello and shortest path.
-- `03_deployment_and_othello.ipynb` compares paired `recompute` and
-  `append_recurrent` quality, per-position free-generation drift,
-  teacher-forced schedule gaps, and Othello random-prefix/legal-set metrics.
-- `04_ablation_diagnostics.ipynb` mirrors the merge-decision rules with paired
-  seed deltas, quality–efficiency plots, memory interventions, extra-pass
-  dynamics, and schedule-gap comparisons.
-
-The notebooks do not automatically save or overwrite any tracked figures.
-Select a comparable result root and uncomment an individual `savefig` line
-only when a plot is worth keeping. Install the plotting extras and start
-Jupyter from the repository root:
+The notebooks do not automatically save or overwrite any tracked figures. Select a comparable result root and uncomment an individual `savefig` line only when a plot is worth keeping. Install the plotting extras and start Jupyter from the repository root:
 
 ```bash
 python3 -m pip install ".[plot]"
 jupyter lab figures/
 ```
 
-Measured throughput should only be compared across matched devices, batch
-sizes, task difficulty, evaluation counts, and output-length distributions.
-The notebooks show individual seeds alongside unsmoothed medians and avoid
-confidence bands that would overstate what a three-seed ablation establishes.
+Measured throughput should only be compared across matched devices, batch sizes, task difficulty, evaluation counts, and output-length distributions. The notebooks show individual seeds alongside unsmoothed medians and avoid confidence bands that would overstate what a three-seed ablation establishes.
 
-### Architecture Examples
+## Architecture Examples
 
 Baseline transformer:
 

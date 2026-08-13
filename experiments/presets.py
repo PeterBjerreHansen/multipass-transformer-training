@@ -247,12 +247,12 @@ _add_bbh_pair(
 _add_bbh_pair(
     "tracking",
     {"num_objects": tracking.DEFAULT_NUM_OBJECTS, "curriculum_start_level": 1},
-    {"num_objects": 4, "curriculum_start_level": 1},
+    {"num_objects": 5, "curriculum_start_level": 1},
 )
 _add_bbh_pair(
     "permutation",
     {"num_objects": permutation.DEFAULT_NUM_OBJECTS, "curriculum_start_level": 1},
-    {"num_objects": 4, "curriculum_start_level": 1},
+    {"num_objects": permutation.DEFAULT_NUM_OBJECTS, "curriculum_start_level": 1},
 )
 _add_bbh_pair(
     "state_machine",

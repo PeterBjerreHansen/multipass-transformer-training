@@ -2,7 +2,7 @@
 query one position, and predict which object ends up there.
 
 Example full sequence:
-<bos> o0 o1 o2 o3 swap p0 p2 <query> p0 <sep> o2 <eos>
+<bos> o0 o1 o2 o3 o4 swap p0 p2 <query> p0 <sep> o2 <eos>
 """
 
 from typing import Dict, List, Sequence, Tuple
@@ -25,7 +25,7 @@ from tasks.common import (
 SWAP_TOKEN = "swap"
 ROTL_TOKEN = "rotl"
 REV_TOKEN = "rev"
-DEFAULT_NUM_OBJECTS = 4
+DEFAULT_NUM_OBJECTS = 5
 
 
 def obj_token(index: int) -> str:

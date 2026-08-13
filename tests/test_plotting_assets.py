@@ -74,9 +74,12 @@ def test_plotting_notebooks_are_valid_output_free_python():
         for cell in bbh["cells"]
         if cell["cell_type"] == "code"
     )
-    assert 'TASK = "pointer_chasing"' in bbh_source
-    assert "summarize_curriculum_levels" in bbh_source
-    assert "steps_to_mastery" in bbh_source
+    assert 'TASK = "permutation"' in bbh_source
+    assert "Cost of mastering each level" not in bbh_source
+    assert "steps_to_mastery" not in bbh_source
+    assert 'ylabel="Number of swaps"' in bbh_source
+    assert 'title="S₅ permutation tracking"' in bbh_source
+    assert 'fig.suptitle(TASK.replace' not in bbh_source
     assert "def find_repo_root(start):" in bbh_source
     assert bbh_source.count("plt.show()") == 3
 
