@@ -109,18 +109,31 @@ def _shortest_path_metrics(model, batch, args, inference_mode: str | None):
 
 
 def _maze_vocab(args):
-    return maze.build_maze_vocab(args.maze_distribution)
+    return maze.build_maze_vocab(
+        args.maze_data_dir,
+        args.maze_input_representation,
+        args.maze_target_representation,
+        args.maze_route_policy,
+    )
 
 
 def _maze_block_size(args) -> int:
-    return maze.required_block_size(args.maze_distribution)
+    return maze.required_block_size(
+        args.maze_data_dir,
+        args.maze_input_representation,
+        args.maze_target_representation,
+        args.maze_route_policy,
+    )
 
 
 def _maze_batch(args, stoi, rng: random.Random, _split: str):
     return maze.build_maze_batch(
         batch_size=args.batch_size,
-        distribution_name=args.maze_distribution,
-        stoi=stoi,
+        maze_data_dir=args.maze_data_dir,
+        input_representation=args.maze_input_representation,
+        target_representation=args.maze_target_representation,
+        route_policy=args.maze_route_policy,
+        split=_split,
         device=args.device,
         rng=rng,
     )

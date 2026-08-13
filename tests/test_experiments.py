@@ -417,29 +417,39 @@ def test_shortest_path_main_uses_warmup_cosine_learning_rate():
             assert preset.values["lr_schedule"] == "constant"
 
 
-def test_maze_cli_exposes_named_searchformer_distributions():
+def test_maze_cli_exposes_compiled_dataset_and_route_options():
     main = parse_trace_args(["--preset", "maze_main"])
     smoke = parse_trace_args(["--preset", "maze_smoke"])
     assert main.task == "maze"
-    assert main.maze_distribution == "searchformer_10"
-    assert smoke.maze_distribution == "smoke"
-    for distribution_name in (
-        "searchformer_10",
-        "searchformer_20",
-        "searchformer_30",
-    ):
-        args = parse_trace_args(
-            [
-                "--preset",
-                "maze_main",
-                "--maze-distribution",
-                distribution_name,
-            ]
-        )
-        assert args.maze_distribution == distribution_name
-    assert maze.required_block_size("searchformer_10") == 107
-    assert maze.required_block_size("searchformer_20") == 407
-    assert maze.required_block_size("searchformer_30") == 907
+    assert main.maze_data_dir == maze.DEFAULT_DATA_DIR
+    assert main.maze_input_representation == "sparse-cells"
+    assert main.maze_target_representation == "cell-path"
+    assert main.maze_route_policy == "astar"
+    assert smoke.maze_data_dir == maze.DEFAULT_SMOKE_DATA_DIR
+    for input_representation in maze.INPUT_REPRESENTATIONS:
+        for target_representation in maze.TARGET_REPRESENTATIONS:
+            for route_policy in maze.ROUTE_POLICIES:
+                args = parse_trace_args(
+                    [
+                        "--preset",
+                        "maze_smoke",
+                        "--maze-input-representation",
+                        input_representation,
+                        "--maze-target-representation",
+                        target_representation,
+                        "--maze-route-policy",
+                        route_policy,
+                    ]
+                )
+                assert args.maze_input_representation == input_representation
+                assert args.maze_target_representation == target_representation
+                assert args.maze_route_policy == route_policy
+                assert maze.required_block_size(
+                    maze.DEFAULT_SMOKE_DATA_DIR,
+                    input_representation,
+                    target_representation,
+                    route_policy,
+                ) > 0
 
 
 def test_main_presets_use_declared_experiment_scales():
@@ -661,7 +671,10 @@ def test_main_trace_preset_contract_is_frozen():
             "lr_decay_steps": 200_000,
             "eval_interval": 5_000,
             "eval_batches": 4,
-            "maze_distribution": "searchformer_10",
+            "maze_data_dir": maze.DEFAULT_DATA_DIR,
+            "maze_input_representation": "sparse-cells",
+            "maze_target_representation": "cell-path",
+            "maze_route_policy": "astar",
         },
     }
     for name, contract in contracts.items():

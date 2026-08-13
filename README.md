@@ -171,7 +171,7 @@ The current experiment tasks are:
 - `permutation`: permutation composition by repeated swaps.
 - `othello`: legal Othello move-trace generation from the standard fixed board, evaluated by continuation legality and teacher-forced legal-set probability.
 - `shortest_path`: shuffled, node-permuted directed acyclic graphs with exactly one shortest route from the declared start to goal; the model generates the complete optimal node path. Its benchmark distributions are `easy` and `main`, and each varies graph size, route length, edge density, and detour shape from example to example.
-- `maze`: [Searchformer-style](https://arxiv.org/abs/2402.14083) random-wall grids represented by start, goal, and blocked-cell coordinates; the model generates a complete shortest coordinate path. Named distributions cover the published 10x10, 20x20, and 30x30 grid sizes.
+- `maze`: finite, compiled [Searchformer-style](https://arxiv.org/abs/2402.14083) random-wall datasets with sparse-cell or flattened dense-cell inputs, cell-path or action targets, and A*, uniform-shortest, or DFS route policies.
 
 The live experiment API is family-specific and preset-driven. `python3 -m experiments.train_bbh` runs the BBH-inspired tasks with final-answer-only supervision and curriculum promotions. `python3 -m experiments.train_trace` runs the trace tasks from named presets with fixed trace targets.
 
@@ -208,35 +208,70 @@ Trace training on 10x10 random-wall mazes:
 python3 -m experiments.train_trace \
   --preset maze_main \
   --architecture memory_tape \
+  --maze-data-dir data/maze/searchformer-10 \
+  --maze-input-representation sparse-cells \
+  --maze-target-representation cell-path \
+  --maze-route-policy astar \
   --run-dir results/trace/maze/main/memory_tape/example_run
 ```
 
-`maze_main` uses the `searchformer_10` distribution. It samples a wall density
-uniformly between 30% and 50%, blocks that many cells, samples distinct open
-start and goal cells, and rejects instances that are unsolvable or whose
-shortest path has fewer than 10 moves. The prompt lists only the start, goal,
-and wall coordinates; the target contains one deterministic BFS shortest path,
-including both endpoints. Wall coordinates are shuffled independently so their
-order does not expose a row-major scan.
+`maze_main` reads a finite, pre-tokenized dataset from
+`data/maze/searchformer-10`. It never generates or silently replaces missing
+maze data. Canonical mazes and compiled NumPy artifacts are created with the
+separate `maze-data-generator` repository. Compile the canonical data directly
+to the directory selected by `--maze-data-dir`, for example:
 
-The same implementation exposes `searchformer_20` and `searchformer_30` through
-`--maze-distribution`. Their required context lengths are 407 and 907 tokens,
-respectively, so they should not inherit the 10x10 batch size without checking
-memory use. `maze_smoke` is a 5x5 software check with lower wall density; it is
-not a literature-comparison distribution.
+```bash
+maze-data compile-all \
+  --input data/searchformer-10.jsonl \
+  --output-dir /path/to/multi_pass_transformer/data/maze/searchformer-10
+```
 
-Maze evaluation reports both `exact_path`, which requires the generated path to
-match the canonical BFS target, and `optimal_path`, which accepts any legal
-shortest route. The latter is the primary quality metric because random-wall
-mazes commonly have multiple optimal solutions. `goal_reached` and
-`legal_prefix_fraction` separate malformed routes from routes that remain legal
-but do not finish correctly.
+The default rendering is:
 
-This first integration samples mazes online to match the repository's existing
-synthetic trace tasks. It follows Searchformer's random-wall geometry and
-minimum-path filter, but it is not an exact reproduction of Searchformer's
-finite deduplicated datasets or A* tie-breaking. The canonical target comes
-from fixed-order BFS; solver-based `optimal_path` is independent of that choice.
+```text
+<height> 10 <width> 10 <start> r2c1 <goal> r8c7 <walls> r0c3 r1c4 ...
+<path> r2c1 r3c1 r3c2 ... r8c7
+```
+
+Each `r2c1`-style square is one vocabulary token. Walls are serialized in
+row-major order, and the cell path includes both endpoints.
+
+`--maze-input-representation dense-cells` instead flattens the complete grid:
+
+```text
+<height> 10 <width> 10 <grid> . . # . S . . # G . ...
+```
+
+`--maze-target-representation actions` replaces the cell path with moves from
+the supplied start:
+
+```text
+<actions> D R R U ...
+```
+
+The two inputs and two targets combine freely. `--maze-route-policy` selects
+`astar`, `uniform_shortest`, or `dfs`; each selection loads a separately
+compiled artifact over the same finite topology splits. A* and uniform routes
+are optimal. DFS stores its deterministic first-found simple path and may be
+longer.
+
+Each compiled artifact contains a manifest, vocabulary, maze IDs, sequence
+lengths, prompt lengths, and `uint16` token arrays for train, validation, and
+test. Arrays are loaded with NumPy memory mapping. The vocabulary comes from
+the artifact rather than being reconstructed inside this repository, and the
+manifest must match every requested representation and policy.
+
+Maze evaluation intentionally reports only:
+
+- `optimal_route`: the generated route is legal, reaches the goal, and has the
+  independently solved shortest length;
+- `exact_target_route`: the generated suffix exactly reproduces the selected
+  A*, uniform-shortest, or DFS target.
+
+For an A*-trained model, these metrics distinguish a different valid optimum
+from imitation of the deterministic A* route. No DFS exact-match metric is
+computed unless DFS is the selected target policy.
 
 `shortest_path_main` runs for 200,000 optimizer steps. Its learning rate warms
 linearly to `5e-4` over the first 4,000 steps, then decays by a cosine schedule

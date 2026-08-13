@@ -202,15 +202,7 @@ def test_maze_training_and_solver_based_evaluation_cli(tmp_path):
         for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     evaluation = next(event for event in events if event["event"] == "eval")
-    for metric in (
-        "optimal_path",
-        "exact_path",
-        "goal_reached",
-        "legal_prefix_fraction",
-        "mean_target_path_length",
-        "mean_wall_fraction",
-        "multiple_shortest_paths",
-    ):
+    for metric in ("optimal_route", "exact_target_route"):
         assert metric in evaluation["metrics"]
 
     eval_dir = tmp_path / "maze_eval"
@@ -226,7 +218,8 @@ def test_maze_training_and_solver_based_evaluation_cli(tmp_path):
     summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["task"] == "maze"
     assert summary["effective_inference_mode"] == "append_recurrent"
-    assert "optimal_path" in summary["metrics"]
+    assert "optimal_route" in summary["metrics"]
+    assert "exact_target_route" in summary["metrics"]
 
 
 def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(

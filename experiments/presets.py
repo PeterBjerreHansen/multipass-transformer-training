@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from tasks.bbh import permutation, pointer_chasing, state_machine, tracking
-from tasks.trace import othello
+from tasks.trace import maze, othello
 
 
 @dataclass(frozen=True)
@@ -171,7 +171,10 @@ maze_main = _trace_defaults(
     token_selection="argmax",
 )
 maze_main.update(
-    maze_distribution="searchformer_10",
+    maze_data_dir=maze.DEFAULT_DATA_DIR,
+    maze_input_representation="sparse-cells",
+    maze_target_representation="cell-path",
+    maze_route_policy="astar",
     train_steps=200_000,
     lr=5e-4,
     lr_schedule="warmup_cosine",
@@ -189,7 +192,12 @@ maze_smoke = _trace_defaults(
     smoke=True,
     token_selection="argmax",
 )
-maze_smoke.update(maze_distribution="smoke")
+maze_smoke.update(
+    maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+    maze_input_representation="sparse-cells",
+    maze_target_representation="cell-path",
+    maze_route_policy="astar",
+)
 TRACE_PRESETS["maze_smoke"] = ExperimentPreset(
     "One-step software check using small random-wall mazes.",
     maze_smoke,

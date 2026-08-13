@@ -135,20 +135,35 @@ def test_symbolic_task_batches_follow_shared_contract(tmp_path):
         required_block_size=shortest_path.required_block_size("main"),
     )
 
-    maze_vocab = maze.build_maze_vocab("searchformer_10")
-    maze_batch = maze.build_maze_batch(
-        batch_size=3,
-        distribution_name="searchformer_10",
-        stoi=maze_vocab[1],
-        device="cpu",
-        rng=random.Random(2029),
-    )
-    _assert_symbolic_batch_contract(
-        maze_batch,
-        stoi=maze_vocab[1],
-        vocab_size=len(maze_vocab[0]),
-        required_block_size=maze.required_block_size("searchformer_10"),
-    )
+    for input_representation in maze.INPUT_REPRESENTATIONS:
+        for target_representation in maze.TARGET_REPRESENTATIONS:
+            maze_vocab = maze.build_maze_vocab(
+                maze.DEFAULT_SMOKE_DATA_DIR,
+                input_representation,
+                target_representation,
+                "astar",
+            )
+            maze_batch = maze.build_maze_batch(
+                batch_size=3,
+                maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+                input_representation=input_representation,
+                target_representation=target_representation,
+                route_policy="astar",
+                split="train",
+                device="cpu",
+                rng=random.Random(2029),
+            )
+            _assert_symbolic_batch_contract(
+                maze_batch,
+                stoi=maze_vocab[1],
+                vocab_size=len(maze_vocab[0]),
+                required_block_size=maze.required_block_size(
+                    maze.DEFAULT_SMOKE_DATA_DIR,
+                    input_representation,
+                    target_representation,
+                    "astar",
+                ),
+            )
 
     kwargs = {
         "othello_data_dir": str(tmp_path / "othello_data"),

@@ -36,7 +36,7 @@ PRIMARY_METRICS = {
     "state_machine": "exact_match",
     "othello": "token_legality",
     "shortest_path": "optimal_path",
-    "maze": "optimal_path",
+    "maze": "optimal_route",
 }
 
 METRIC_LABELS = {
@@ -48,6 +48,8 @@ METRIC_LABELS = {
     "sequence_legality": "Fully legal sequence rate",
     "mean_legal_len": "Mean legal-prefix length",
     "optimal_path": "Optimal-path rate",
+    "optimal_route": "Optimal-route rate",
+    "exact_target_route": "Exact target-route rate",
     "optimal_path_short": "Optimal-path rate (short bucket)",
     "optimal_path_medium": "Optimal-path rate (medium bucket)",
     "optimal_path_long": "Optimal-path rate (long bucket)",
@@ -106,7 +108,8 @@ def _config_context(run_dir: Path, *, root: Path | None = None) -> dict:
         "max_level": args.get("max_level"),
         "curriculum_threshold": args.get("curriculum_threshold"),
         "shortest_path_distribution": args.get("shortest_path_distribution"),
-        "maze_distribution": args.get("maze_distribution"),
+        "maze_data_dir": args.get("maze_data_dir"),
+        "maze_route_policy": args.get("maze_route_policy"),
         "total_parameters": model_stats.get("total_parameters"),
         "non_embedding_parameters": model_stats.get("non_embedding_parameters"),
     }

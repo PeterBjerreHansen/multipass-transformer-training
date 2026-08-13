@@ -1,0 +1,47 @@
+{
+  "block_size": 32,
+  "compiled_format_version": 1,
+  "input_representation": "sparse-cells",
+  "max_sequence_length": 33,
+  "route_policy": "dfs",
+  "route_policy_definition": {
+    "algorithm": "dfs_first_found",
+    "neighbor_order": "URDL",
+    "version": 1
+  },
+  "source_schema_version": "1.1",
+  "source_sha256": "984ea68a7f5c86538831ae9aa42f92c319f581f698452d6061c7f85968782a55",
+  "special_token_ids": {
+    "bos": 1,
+    "eos": 3,
+    "pad": 0,
+    "sep": 2
+  },
+  "splits": {
+    "test": {
+      "count": 6,
+      "maze_ids": "test_maze_ids.npy",
+      "prompt_lengths": "test_prompt_lengths.npy",
+      "sequence_lengths": "test_sequence_lengths.npy",
+      "tokens": "test_tokens.npy"
+    },
+    "train": {
+      "count": 18,
+      "maze_ids": "train_maze_ids.npy",
+      "prompt_lengths": "train_prompt_lengths.npy",
+      "sequence_lengths": "train_sequence_lengths.npy",
+      "tokens": "train_tokens.npy"
+    },
+    "validation": {
+      "count": 6,
+      "maze_ids": "validation_maze_ids.npy",
+      "prompt_lengths": "validation_prompt_lengths.npy",
+      "sequence_lengths": "validation_sequence_lengths.npy",
+      "tokens": "validation_tokens.npy"
+    }
+  },
+  "target_representation": "actions",
+  "token_dtype": "uint16",
+  "vocab": "vocab.json",
+  "vocab_size": 46
+}

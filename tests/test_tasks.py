@@ -4,6 +4,7 @@ import random
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 import torch
 
 from models import CausalTransformer, TransformerConfig
@@ -477,91 +478,121 @@ def test_shortest_path_easy_example_can_be_overfit_and_generated():
     assert torch.equal(generated[:, prompt_len : prompt_len + output_len], expected)
 
 
-def test_searchformer_maze_generation_is_seeded_and_solver_verified():
-    for distribution_name in (
-        "smoke",
-        "searchformer_10",
-        "searchformer_20",
-        "searchformer_30",
-    ):
-        distribution = maze.get_maze_distribution(distribution_name)
-        _vocab, stoi, _itos = maze.build_maze_vocab(distribution_name)
-        first_rng = random.Random(827)
-        second_rng = random.Random(827)
-        topology_rng = random.Random(827)
-        for _ in range(10):
-            first = maze.sample_maze_example(
-                distribution_name,
-                stoi,
-                first_rng,
-            )
-            second = maze.sample_maze_example(
-                distribution_name,
-                stoi,
-                second_rng,
-            )
-            assert first == second
-            prompt, answer, instance = first
-            # Representation randomization must not alter the topology stream.
-            assert instance == maze.sample_random_wall_maze(
-                distribution_name,
-                topology_rng,
-            )
-            walls, start, goal = maze.parse_maze_prompt(
-                prompt,
-                size=distribution.size,
-            )
-            solved_path, path_count = maze.solve_maze(
-                distribution.size,
-                walls,
-                start,
-                goal,
-            )
-            answer_cells = [
-                maze.token_id_to_cell(token_id, size=distribution.size)
-                for token_id in answer
-            ]
-            assert walls == instance.walls
-            assert start == instance.start
-            assert goal == instance.goal
-            assert solved_path == list(instance.path) == answer_cells
-            assert path_count == instance.shortest_path_count in (1, 2)
-            assert len(solved_path) - 1 >= distribution.min_path_length
-            realized_wall_fraction = len(walls) / (distribution.size**2)
-            rounding_tolerance = 0.5 / (distribution.size**2)
-            assert (
-                realized_wall_fraction + rounding_tolerance
-                >= distribution.min_wall_fraction
-            )
-            assert (
-                realized_wall_fraction - rounding_tolerance
-                <= distribution.max_wall_fraction
-            )
+def test_compiled_maze_datasets_are_memory_mapped_and_solver_verified():
+    for input_representation in maze.INPUT_REPRESENTATIONS:
+        for target_representation in maze.TARGET_REPRESENTATIONS:
+            for route_policy in maze.ROUTE_POLICIES:
+                vocab, _stoi, itos = maze.build_maze_vocab(
+                    maze.DEFAULT_SMOKE_DATA_DIR,
+                    input_representation,
+                    target_representation,
+                    route_policy,
+                )
+                dataset = maze.load_maze_dataset(
+                    split="train",
+                    maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+                    input_representation=input_representation,
+                    target_representation=target_representation,
+                    route_policy=route_policy,
+                )
+                assert isinstance(dataset.tokens, np.memmap)
+                assert len(dataset) == 18
+                sequence_length = int(dataset.sequence_lengths[0])
+                prompt_length = int(dataset.prompt_lengths[0])
+                tokens = dataset.tokens[0, :sequence_length].tolist()
+                problem = maze.parse_maze_prompt(
+                    tokens[1 : prompt_length - 1],
+                    itos=itos,
+                    input_representation=input_representation,
+                )
+                marker_ok, target_path = maze.decode_maze_target(
+                    tokens[prompt_length:-1],
+                    problem=problem,
+                    itos=itos,
+                    target_representation=target_representation,
+                )
+                shortest = maze.solve_maze(problem)
+                assert marker_ok
+                assert target_path[0] == problem.start
+                assert target_path[-1] == problem.goal
+                assert all(
+                    current in maze.neighboring_cells(
+                        int(previous),
+                        width=problem.width,
+                        height=problem.height,
+                    )
+                    for previous, current in zip(target_path, target_path[1:])
+                )
+                if route_policy != "dfs":
+                    assert len(target_path) == len(shortest)
+                assert int(dataset.tokens.max()) < len(vocab)
 
 
-def test_maze_evaluation_accepts_an_alternative_optimal_path():
-    _vocab, stoi, _itos = maze.build_maze_vocab("smoke")
+def test_compiled_maze_batch_sampling_is_seeded():
+    kwargs = dict(
+        batch_size=4,
+        maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+        input_representation="dense-cells",
+        target_representation="actions",
+        route_policy="uniform_shortest",
+        split="validation",
+        device="cpu",
+    )
+    first = maze.build_maze_batch(rng=random.Random(827), **kwargs)
+    second = maze.build_maze_batch(rng=random.Random(827), **kwargs)
+    assert torch.equal(first.idx, second.idx)
+    assert torch.equal(first.targets, second.targets)
 
-    def coordinate_id(cell: int) -> int:
-        row, column = maze.cell_to_coordinate(cell, size=5)
-        return stoi[maze.coordinate_token(row, column)]
+
+def test_missing_compiled_maze_dataset_does_not_generate_online(tmp_path):
+    with pytest.raises(FileNotFoundError, match="never generates maze data online"):
+        maze.build_maze_vocab(tmp_path, "sparse-cells", "cell-path", "astar")
+
+
+@pytest.mark.parametrize("target_representation", maze.TARGET_REPRESENTATIONS)
+def test_maze_evaluation_accepts_an_alternative_optimal_path(target_representation):
+    _vocab, stoi, _itos = maze.build_maze_vocab(
+        maze.DEFAULT_SMOKE_DATA_DIR,
+        "sparse-cells",
+        target_representation,
+        "astar",
+    )
+
+    def cell_id(cell: int) -> int:
+        row, column = divmod(cell, 5)
+        return stoi[f"r{row}c{column}"]
 
     # Both 0 -> 1 -> 6 and 0 -> 5 -> 6 are optimal on an open 5x5 grid.
     prompt = [
+        stoi[maze.HEIGHT_TOKEN],
+        stoi["5"],
+        stoi[maze.WIDTH_TOKEN],
+        stoi["5"],
         stoi[maze.START_TOKEN],
-        coordinate_id(0),
+        cell_id(0),
         stoi[maze.GOAL_TOKEN],
-        coordinate_id(6),
+        cell_id(6),
         stoi[maze.WALLS_TOKEN],
     ]
-    canonical_answer = [coordinate_id(cell) for cell in (0, 1, 6)]
+    if target_representation == "cell-path":
+        canonical_answer = [
+            stoi[maze.PATH_TOKEN],
+            *(cell_id(cell) for cell in (0, 1, 6)),
+        ]
+        alternative_answer = [
+            stoi[maze.PATH_TOKEN],
+            *(cell_id(cell) for cell in (0, 5, 6)),
+        ]
+    else:
+        canonical_answer = [stoi[maze.ACTIONS_TOKEN], stoi["R"], stoi["D"]]
+        alternative_answer = [stoi[maze.ACTIONS_TOKEN], stoi["D"], stoi["R"]]
     batch = build_batch_from_sequences(
         [make_sequence(prompt, canonical_answer, stoi)],
         pad_id=stoi["<pad>"],
         device="cpu",
     )
     alternative_suffix = torch.tensor(
-        [coordinate_id(cell) for cell in (0, 5, 6)] + [stoi["<eos>"]]
+        [*alternative_answer, stoi["<eos>"]]
     )
 
     class FixedGeneration:
@@ -578,11 +609,62 @@ def test_maze_evaluation_accepts_an_alternative_optimal_path():
             architecture="transformer",
             inference_mode="recompute",
             token_selection="argmax",
-            maze_distribution="smoke",
+            maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+            maze_input_representation="sparse-cells",
+            maze_target_representation=target_representation,
+            maze_route_policy="astar",
         ),
     )
-    assert metrics["optimal_path"] == 1.0
-    assert metrics["exact_path"] == 0.0
-    assert metrics["goal_reached"] == 1.0
-    assert metrics["legal_prefix_fraction"] == 1.0
-    assert metrics["multiple_shortest_paths"] == 1.0
+    assert metrics["optimal_route"] == 1.0
+    assert metrics["exact_target_route"] == 0.0
+
+
+def test_maze_evaluation_accepts_early_eos_for_a_shorter_route_than_dfs_target():
+    _vocab, stoi, _itos = maze.build_maze_vocab(
+        maze.DEFAULT_SMOKE_DATA_DIR,
+        "sparse-cells",
+        "actions",
+        "dfs",
+    )
+    prompt = [
+        stoi[maze.HEIGHT_TOKEN],
+        stoi["5"],
+        stoi[maze.WIDTH_TOKEN],
+        stoi["5"],
+        stoi[maze.START_TOKEN],
+        stoi["r0c0"],
+        stoi[maze.GOAL_TOKEN],
+        stoi["r1c0"],
+        stoi[maze.WALLS_TOKEN],
+    ]
+    dfs_answer = [
+        stoi[maze.ACTIONS_TOKEN],
+        *(stoi[action] for action in "RRRRDLLLL"),
+    ]
+    batch = build_batch_from_sequences(
+        [make_sequence(prompt, dfs_answer, stoi)],
+        pad_id=stoi["<pad>"],
+        device="cpu",
+    )
+    shorter_optimal = torch.tensor(
+        [stoi[maze.ACTIONS_TOKEN], stoi["D"], stoi["<eos>"]]
+    )
+
+    class FixedGeneration:
+        def generate(self, supplied_prompt, **_kwargs):
+            return torch.cat((supplied_prompt, shorter_optimal[None, :]), dim=1)
+
+    metrics = maze_eval.generation_metrics(
+        FixedGeneration(),
+        batch,
+        SimpleNamespace(
+            architecture="transformer",
+            inference_mode="recompute",
+            token_selection="argmax",
+            maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+            maze_input_representation="sparse-cells",
+            maze_target_representation="actions",
+            maze_route_policy="dfs",
+        ),
+    )
+    assert metrics == {"optimal_route": 1.0, "exact_target_route": 0.0}

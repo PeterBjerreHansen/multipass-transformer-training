@@ -1,383 +1,512 @@
-"""Searchformer-style random-wall mazes as a fixed-suffix trace task.
-
-Each prompt names the start, goal, and blocked grid cells. The target is one
-deterministically selected shortest coordinate path, including both endpoints.
-The generator samples an exact wall count from a uniformly sampled density and
-rejects mazes that are unsolvable or have a path shorter than the grid width.
-"""
+"""Memory-mapped offline maze datasets for route-learning experiments."""
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import json
+from pathlib import Path
 import random
-from typing import Dict, Iterable, Sequence, Tuple
+import re
+from typing import Dict, Sequence, Tuple
 
-from tasks.common import (
-    BOS_TOKEN,
-    EOS_TOKEN,
-    PAD_TOKEN,
-    SEP_TOKEN,
-    SymbolicBatch,
-    build_batch_from_sequences,
-    build_vocab,
-    make_sequence,
-)
+import numpy as np
+import torch
+
+from tasks.common import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, SEP_TOKEN, SymbolicBatch
 
 
+INPUT_REPRESENTATIONS = ("dense-cells", "sparse-cells")
+TARGET_REPRESENTATIONS = ("cell-path", "actions")
+ROUTE_POLICIES = ("astar", "uniform_shortest", "dfs")
+COMPILED_FORMAT_VERSION = 1
+DEFAULT_DATA_DIR = "data/maze/searchformer-10"
+DEFAULT_SMOKE_DATA_DIR = "tests/fixtures/maze-smoke"
+HEIGHT_TOKEN = "<height>"
+WIDTH_TOKEN = "<width>"
+GRID_TOKEN = "<grid>"
 START_TOKEN = "<start>"
 GOAL_TOKEN = "<goal>"
 WALLS_TOKEN = "<walls>"
-START_TOKEN_ID = 4
-GOAL_TOKEN_ID = 5
-WALLS_TOKEN_ID = 6
-CELL_TOKEN_OFFSET = 7
-MAX_SAMPLING_ATTEMPTS = 10_000
+PATH_TOKEN = "<path>"
+ACTIONS_TOKEN = "<actions>"
+OPEN_CELL_TOKEN = "."
+WALL_CELL_TOKEN = "#"
+START_CELL_TOKEN = "S"
+GOAL_CELL_TOKEN = "G"
+ACTION_DELTAS = {
+    "U": (-1, 0),
+    "R": (0, 1),
+    "D": (1, 0),
+    "L": (0, -1),
+}
+CELL_TOKEN_PATTERN = re.compile(r"r(\d+)c(\d+)")
 
 
 @dataclass(frozen=True)
-class MazeDistribution:
-    """A named distribution over random blocked-cell mazes."""
-
-    name: str
-    size: int
-    min_wall_fraction: float
-    max_wall_fraction: float
-    min_path_length: int
-
-
-@dataclass(frozen=True)
-class MazeInstance:
-    """One solver-verified maze, using row-major integer cell indices."""
-
-    distribution_name: str
-    size: int
+class MazeProblem:
+    width: int
+    height: int
     walls: frozenset[int]
     start: int
     goal: int
-    path: tuple[int, ...]
-    shortest_path_count: int
-    sampled_wall_fraction: float
 
 
-MAZE_DISTRIBUTIONS = {
-    # Small, inexpensive software check. This is not a literature-comparison
-    # distribution because the 5x5 grid needs a lower density to remain useful.
-    "smoke": MazeDistribution(
-        name="smoke",
-        size=5,
-        min_wall_fraction=0.15,
-        max_wall_fraction=0.30,
-        min_path_length=5,
-    ),
-    "searchformer_10": MazeDistribution(
-        name="searchformer_10",
-        size=10,
-        min_wall_fraction=0.30,
-        max_wall_fraction=0.50,
-        min_path_length=10,
-    ),
-    "searchformer_20": MazeDistribution(
-        name="searchformer_20",
-        size=20,
-        min_wall_fraction=0.30,
-        max_wall_fraction=0.50,
-        min_path_length=20,
-    ),
-    "searchformer_30": MazeDistribution(
-        name="searchformer_30",
-        size=30,
-        min_wall_fraction=0.30,
-        max_wall_fraction=0.50,
-        min_path_length=30,
-    ),
-}
+@dataclass(frozen=True)
+class CompiledMazeDataset:
+    tokens: np.ndarray
+    sequence_lengths: np.ndarray
+    prompt_lengths: np.ndarray
+    maze_ids: np.ndarray
+
+    def __len__(self) -> int:
+        return int(self.tokens.shape[0])
+
+    def sample_indices(self, count: int, rng: random.Random) -> list[int]:
+        return [rng.randrange(len(self)) for _ in range(count)]
 
 
-def get_maze_distribution(name: str) -> MazeDistribution:
+@dataclass(frozen=True)
+class CompiledMazeBundle:
+    directory: Path
+    manifest: dict
+    vocab: tuple[str, ...]
+    stoi: Dict[str, int]
+    itos: Dict[int, str]
+
+
+_BUNDLE_CACHE: dict[tuple[str, str, str, str], CompiledMazeBundle] = {}
+_DATASET_CACHE: dict[tuple[str, str, str, str, str], CompiledMazeDataset] = {}
+
+
+def _artifact_name(
+    input_representation: str,
+    target_representation: str,
+    route_policy: str,
+) -> str:
+    return f"{input_representation}__{target_representation}__{route_policy}"
+
+
+def resolve_compiled_dir(
+    maze_data_dir: str | Path,
+    *,
+    input_representation: str,
+    target_representation: str,
+    route_policy: str,
+) -> Path:
+    root = Path(maze_data_dir).expanduser().resolve()
+    if (root / "manifest.json").is_file():
+        return root
+    return root / _artifact_name(
+        input_representation,
+        target_representation,
+        route_policy,
+    )
+
+
+def load_maze_bundle(
+    *,
+    maze_data_dir: str | Path,
+    input_representation: str,
+    target_representation: str,
+    route_policy: str,
+) -> CompiledMazeBundle:
+    if input_representation not in INPUT_REPRESENTATIONS:
+        raise ValueError(f"unsupported maze input representation: {input_representation}")
+    if target_representation not in TARGET_REPRESENTATIONS:
+        raise ValueError(f"unsupported maze target representation: {target_representation}")
+    if route_policy not in ROUTE_POLICIES:
+        raise ValueError(f"unsupported maze route policy: {route_policy}")
+    directory = resolve_compiled_dir(
+        maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
+    )
+    key = (
+        str(directory),
+        input_representation,
+        target_representation,
+        route_policy,
+    )
+    cached = _BUNDLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            "compiled maze dataset not found at "
+            f"{directory}. Generate and compile it with maze-data-generator; "
+            "multipass never generates maze data online."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = {
+        "compiled_format_version": COMPILED_FORMAT_VERSION,
+        "input_representation": input_representation,
+        "target_representation": target_representation,
+        "route_policy": route_policy,
+    }
+    for field, value in expected.items():
+        if manifest.get(field) != value:
+            raise ValueError(
+                f"maze dataset manifest {field} is {manifest.get(field)!r}; "
+                f"expected {value!r}"
+            )
+    vocab_path = directory / str(manifest.get("vocab", "vocab.json"))
+    vocab_payload = json.loads(vocab_path.read_text(encoding="utf-8"))
+    vocab = tuple(str(token) for token in vocab_payload["tokens"])
+    if len(vocab) != len(set(vocab)) or len(vocab) != int(manifest["vocab_size"]):
+        raise ValueError("compiled maze vocabulary is inconsistent")
+    stoi = {token: index for index, token in enumerate(vocab)}
+    itos = {index: token for token, index in stoi.items()}
+    special_tokens = {
+        "pad": PAD_TOKEN,
+        "bos": BOS_TOKEN,
+        "sep": SEP_TOKEN,
+        "eos": EOS_TOKEN,
+    }
+    for token in special_tokens.values():
+        if token not in stoi:
+            raise ValueError(f"compiled maze vocabulary is missing {token}")
+    expected_special_ids = {
+        name: stoi[token] for name, token in special_tokens.items()
+    }
+    if manifest.get("special_token_ids") != expected_special_ids:
+        raise ValueError("compiled maze special-token IDs are inconsistent")
+    max_sequence_length = int(manifest["max_sequence_length"])
+    if int(manifest["block_size"]) != max_sequence_length - 1:
+        raise ValueError("compiled maze block size is inconsistent")
+    if manifest.get("token_dtype") != "uint16":
+        raise ValueError("compiled maze token dtype must be uint16")
+    bundle = CompiledMazeBundle(directory, manifest, vocab, stoi, itos)
+    _BUNDLE_CACHE[key] = bundle
+    return bundle
+
+
+def load_maze_dataset(
+    *,
+    split: str,
+    maze_data_dir: str | Path,
+    input_representation: str,
+    target_representation: str,
+    route_policy: str,
+) -> CompiledMazeDataset:
+    canonical_split = "validation" if split == "val" else split
+    if canonical_split not in {"train", "validation", "test"}:
+        raise ValueError("maze split must be train, val, validation, or test")
+    bundle = load_maze_bundle(
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
+    )
+    key = (
+        str(bundle.directory),
+        canonical_split,
+        input_representation,
+        target_representation,
+        route_policy,
+    )
+    cached = _DATASET_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
-        return MAZE_DISTRIBUTIONS[name]
+        files = bundle.manifest["splits"][canonical_split]
     except KeyError as error:
-        raise ValueError(f"unsupported maze distribution: {name}") from error
-
-
-def coordinate_token(row: int, column: int) -> str:
-    if row < 0 or column < 0:
-        raise ValueError("maze coordinates must be non-negative")
-    return f"r{row}c{column}"
-
-
-def cell_to_coordinate(cell: int, *, size: int) -> tuple[int, int]:
-    if size < 2:
-        raise ValueError("maze size must be at least 2")
-    if not 0 <= cell < size * size:
-        raise ValueError("cell is outside the maze")
-    return divmod(cell, size)
+        raise ValueError(
+            f"compiled maze dataset has no {canonical_split!r} split"
+        ) from error
+    dataset = CompiledMazeDataset(
+        tokens=np.load(bundle.directory / files["tokens"], mmap_mode="r", allow_pickle=False),
+        sequence_lengths=np.load(
+            bundle.directory / files["sequence_lengths"],
+            mmap_mode="r",
+            allow_pickle=False,
+        ),
+        prompt_lengths=np.load(
+            bundle.directory / files["prompt_lengths"],
+            mmap_mode="r",
+            allow_pickle=False,
+        ),
+        maze_ids=np.load(bundle.directory / files["maze_ids"], mmap_mode="r", allow_pickle=False),
+    )
+    expected_count = int(files["count"])
+    if not (
+        expected_count > 0
+        and len(dataset) == expected_count
+        and dataset.tokens.ndim == 2
+        and dataset.tokens.shape[1] == int(bundle.manifest["max_sequence_length"])
+        and dataset.sequence_lengths.shape == (expected_count,)
+        and dataset.prompt_lengths.shape == (expected_count,)
+        and dataset.maze_ids.shape == (expected_count,)
+    ):
+        raise ValueError("compiled maze split arrays have inconsistent shapes")
+    if dataset.tokens.dtype != np.uint16:
+        raise ValueError("compiled maze tokens must use uint16")
+    if dataset.sequence_lengths.dtype != np.uint16:
+        raise ValueError("compiled maze sequence lengths must use uint16")
+    if dataset.prompt_lengths.dtype != np.uint16:
+        raise ValueError("compiled maze prompt lengths must use uint16")
+    if dataset.maze_ids.dtype != np.dtype("S24"):
+        raise ValueError("compiled maze IDs must use fixed-width 24-byte strings")
+    if np.any(dataset.prompt_lengths >= dataset.sequence_lengths):
+        raise ValueError("compiled maze prompt lengths must precede sequence ends")
+    if np.any(dataset.sequence_lengths > dataset.tokens.shape[1]):
+        raise ValueError("compiled maze sequence lengths exceed the token array")
+    _DATASET_CACHE[key] = dataset
+    return dataset
 
 
 def build_maze_vocab(
-    distribution_name: str,
+    maze_data_dir: str | Path,
+    input_representation: str = "sparse-cells",
+    target_representation: str = "cell-path",
+    route_policy: str = "astar",
 ) -> Tuple[list[str], Dict[str, int], Dict[int, str]]:
-    distribution = get_maze_distribution(distribution_name)
-    tokens = [
-        PAD_TOKEN,
-        BOS_TOKEN,
-        SEP_TOKEN,
-        EOS_TOKEN,
-        START_TOKEN,
-        GOAL_TOKEN,
-        WALLS_TOKEN,
-    ]
-    tokens.extend(
-        coordinate_token(row, column)
-        for row in range(distribution.size)
-        for column in range(distribution.size)
+    bundle = load_maze_bundle(
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
     )
-    return build_vocab(tokens)
+    return list(bundle.vocab), dict(bundle.stoi), dict(bundle.itos)
 
 
-def required_block_size(distribution_name: str) -> int:
-    """Return a tight upper bound for every maze sequence in a distribution.
-
-    A maze with ``W`` walls has five prompt markers/coordinates and at most
-    ``size**2 - W`` path cells. BOS and SEP occupy two more model positions;
-    EOS is the shifted target and does not occupy an input position.
-    """
-    distribution = get_maze_distribution(distribution_name)
-    num_cells = distribution.size * distribution.size
-    minimum_wall_count = round(distribution.min_wall_fraction * num_cells)
-    # The serialized input has one token per wall and the path can visit at
-    # most every open cell. Their sum is therefore bounded by num_cells.
-    # Retain the explicit calculation so the bound remains correct if a future
-    # distribution changes how endpoints and walls are sampled.
-    maximum_path_cells = num_cells - minimum_wall_count
-    return 7 + minimum_wall_count + maximum_path_cells
-
-
-def neighboring_cells(cell: int, *, size: int) -> tuple[int, ...]:
-    """Return four-neighbor cells in a fixed up, right, down, left order."""
-    row, column = cell_to_coordinate(cell, size=size)
-    neighbors = []
-    if row > 0:
-        neighbors.append(cell - size)
-    if column + 1 < size:
-        neighbors.append(cell + 1)
-    if row + 1 < size:
-        neighbors.append(cell + size)
-    if column > 0:
-        neighbors.append(cell - 1)
-    return tuple(neighbors)
-
-
-def solve_maze(
-    size: int,
-    walls: Iterable[int],
-    start: int,
-    goal: int,
-) -> tuple[list[int], int]:
-    """Return a canonical shortest path and its multiplicity, capped at two."""
-    if size < 2:
-        raise ValueError("maze size must be at least 2")
-    num_cells = size * size
-    wall_set = frozenset(int(cell) for cell in walls)
-    if any(not 0 <= cell < num_cells for cell in wall_set):
-        raise ValueError("wall is outside the maze")
-    if not 0 <= start < num_cells or not 0 <= goal < num_cells:
-        raise ValueError("start and goal must be valid cells")
-    if start == goal:
-        raise ValueError("start and goal must differ")
-    if start in wall_set or goal in wall_set:
-        raise ValueError("start and goal must be open cells")
-
-    distances = [-1] * num_cells
-    path_counts = [0] * num_cells
-    parents: list[int | None] = [None] * num_cells
-    distances[start] = 0
-    path_counts[start] = 1
-    queue = deque([start])
-    while queue:
-        source = queue.popleft()
-        for target in neighboring_cells(source, size=size):
-            if target in wall_set:
-                continue
-            candidate_distance = distances[source] + 1
-            if distances[target] == -1:
-                distances[target] = candidate_distance
-                path_counts[target] = path_counts[source]
-                parents[target] = source
-                queue.append(target)
-            elif distances[target] == candidate_distance:
-                path_counts[target] = min(
-                    2,
-                    path_counts[target] + path_counts[source],
-                )
-
-    if distances[goal] < 0:
-        raise ValueError("goal is unreachable from start")
-    path = [goal]
-    current = goal
-    while current != start:
-        parent = parents[current]
-        if parent is None:
-            raise RuntimeError("maze path reconstruction failed")
-        path.append(parent)
-        current = parent
-    path.reverse()
-    return path, path_counts[goal]
-
-
-def sample_random_wall_maze(
-    distribution_name: str,
-    rng: random.Random,
-) -> MazeInstance:
-    """Sample one accepted random-wall maze by literal rejection sampling."""
-    distribution = get_maze_distribution(distribution_name)
-    num_cells = distribution.size * distribution.size
-    cells = range(num_cells)
-    for _attempt in range(MAX_SAMPLING_ATTEMPTS):
-        sampled_fraction = rng.uniform(
-            distribution.min_wall_fraction,
-            distribution.max_wall_fraction,
-        )
-        wall_count = min(num_cells - 2, round(sampled_fraction * num_cells))
-        walls = frozenset(rng.sample(cells, wall_count))
-        open_cells = [cell for cell in cells if cell not in walls]
-        start, goal = rng.sample(open_cells, 2)
-        try:
-            path, path_count = solve_maze(
-                distribution.size,
-                walls,
-                start,
-                goal,
-            )
-        except ValueError:
-            # All inputs above are constructed to satisfy solve_maze's static
-            # invariants, so only an unreachable goal is an expected rejection.
-            continue
-        path_length = len(path) - 1
-        if path_length < distribution.min_path_length:
-            continue
-        return MazeInstance(
-            distribution_name=distribution.name,
-            size=distribution.size,
-            walls=walls,
-            start=start,
-            goal=goal,
-            path=tuple(path),
-            shortest_path_count=path_count,
-            sampled_wall_fraction=sampled_fraction,
-        )
-    raise RuntimeError(
-        f"failed to sample {distribution.name} after "
-        f"{MAX_SAMPLING_ATTEMPTS} attempts"
+def required_block_size(
+    maze_data_dir: str | Path,
+    input_representation: str = "sparse-cells",
+    target_representation: str = "cell-path",
+    route_policy: str = "astar",
+) -> int:
+    bundle = load_maze_bundle(
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
     )
-
-
-def sample_maze_example(
-    distribution_name: str,
-    stoi: Dict[str, int],
-    rng: random.Random,
-) -> tuple[list[int], list[int], MazeInstance]:
-    instance = sample_random_wall_maze(distribution_name, rng)
-
-    def coordinate_id(cell: int) -> int:
-        row, column = cell_to_coordinate(cell, size=instance.size)
-        return stoi[coordinate_token(row, column)]
-
-    serialized_walls = list(instance.walls)
-    # Randomize the set serialization without advancing the topology RNG. This
-    # keeps the sequence of sampled mazes stable if representations are added
-    # or changed later.
-    representation_rng = random.Random()
-    representation_rng.setstate(rng.getstate())
-    representation_rng.shuffle(serialized_walls)
-    prompt = [
-        stoi[START_TOKEN],
-        coordinate_id(instance.start),
-        stoi[GOAL_TOKEN],
-        coordinate_id(instance.goal),
-        stoi[WALLS_TOKEN],
-        *(coordinate_id(cell) for cell in serialized_walls),
-    ]
-    answer = [coordinate_id(cell) for cell in instance.path]
-    return prompt, answer, instance
+    return int(bundle.manifest["block_size"])
 
 
 def build_maze_batch(
     batch_size: int,
-    distribution_name: str,
-    stoi: Dict[str, int],
+    maze_data_dir: str | Path,
+    input_representation: str,
+    target_representation: str,
+    route_policy: str,
+    *,
+    split: str,
     device=None,
     rng: random.Random | None = None,
 ) -> SymbolicBatch:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    get_maze_distribution(distribution_name)
     rng = rng or random.Random()
-    rows = []
-    for _ in range(batch_size):
-        prompt, answer, _instance = sample_maze_example(
-            distribution_name,
-            stoi,
-            rng,
-        )
-        rows.append(make_sequence(prompt, answer, stoi))
-    return build_batch_from_sequences(rows, pad_id=stoi[PAD_TOKEN], device=device)
+    dataset = load_maze_dataset(
+        split=split,
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
+    )
+    bundle = load_maze_bundle(
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
+    )
+    indices = dataset.sample_indices(batch_size, rng)
+    sequence_lengths = np.asarray(dataset.sequence_lengths[indices], dtype=np.int64)
+    prompt_lengths = np.asarray(dataset.prompt_lengths[indices], dtype=np.int64)
+    max_sequence_length = int(sequence_lengths.max())
+    full = np.asarray(
+        dataset.tokens[indices, :max_sequence_length],
+        dtype=np.int64,
+    )
+    inputs = full[:, :-1].copy()
+    targets = full[:, 1:].copy()
+    positions = np.arange(targets.shape[1])[None, :]
+    inputs[positions >= (sequence_lengths - 1)[:, None]] = bundle.stoi[PAD_TOKEN]
+    targets[positions < (prompt_lengths - 1)[:, None]] = -1
+    targets[positions >= (sequence_lengths - 1)[:, None]] = -1
+    output_lengths = sequence_lengths - prompt_lengths
+    return SymbolicBatch(
+        idx=torch.as_tensor(inputs, dtype=torch.long, device=device),
+        targets=torch.as_tensor(targets, dtype=torch.long, device=device),
+        prompt_lengths=torch.as_tensor(prompt_lengths, dtype=torch.long, device=device),
+        output_lengths=torch.as_tensor(output_lengths, dtype=torch.long, device=device),
+    )
 
 
-def token_id_to_cell(token_id: int, *, size: int) -> int | None:
-    cell = int(token_id) - CELL_TOKEN_OFFSET
-    return cell if 0 <= cell < size * size else None
+def cell_to_coordinate(cell: int, *, width: int, height: int) -> tuple[int, int]:
+    if not 0 <= cell < width * height:
+        raise ValueError("cell is outside the maze")
+    return divmod(cell, width)
+
+
+def token_to_cell(token: str, *, width: int, height: int) -> int | None:
+    match = CELL_TOKEN_PATTERN.fullmatch(token)
+    if match is None:
+        return None
+    row, column = int(match.group(1)), int(match.group(2))
+    if not 0 <= row < height or not 0 <= column < width:
+        return None
+    return row * width + column
+
+
+def neighboring_cells(cell: int, *, width: int, height: int) -> tuple[int, ...]:
+    row, column = cell_to_coordinate(cell, width=width, height=height)
+    result = []
+    for row_delta, column_delta in ACTION_DELTAS.values():
+        next_row, next_column = row + row_delta, column + column_delta
+        if 0 <= next_row < height and 0 <= next_column < width:
+            result.append(next_row * width + next_column)
+    return tuple(result)
+
+
+def solve_maze(problem: MazeProblem) -> list[int]:
+    distances = [-1] * (problem.width * problem.height)
+    parents: list[int | None] = [None] * len(distances)
+    distances[problem.start] = 0
+    queue = deque([problem.start])
+    while queue:
+        source = queue.popleft()
+        for target in neighboring_cells(
+            source,
+            width=problem.width,
+            height=problem.height,
+        ):
+            if target in problem.walls or distances[target] >= 0:
+                continue
+            distances[target] = distances[source] + 1
+            parents[target] = source
+            queue.append(target)
+    if distances[problem.goal] < 0:
+        raise ValueError("goal is unreachable from start")
+    path = [problem.goal]
+    while path[-1] != problem.start:
+        parent = parents[path[-1]]
+        if parent is None:
+            raise RuntimeError("maze path reconstruction failed")
+        path.append(parent)
+    return list(reversed(path))
 
 
 def parse_maze_prompt(
     prompt_tokens: Sequence[int],
     *,
-    size: int,
-) -> tuple[frozenset[int], int, int]:
-    """Parse a prompt without BOS or SEP into walls, start, and goal."""
-    tokens = [int(token_id) for token_id in prompt_tokens]
-    if len(tokens) < 5:
-        raise ValueError("maze prompt is too short")
-    if (
-        tokens[0] != START_TOKEN_ID
-        or tokens[2] != GOAL_TOKEN_ID
-        or tokens[4] != WALLS_TOKEN_ID
-    ):
-        raise ValueError("maze prompt has invalid markers")
-    start = token_id_to_cell(tokens[1], size=size)
-    goal = token_id_to_cell(tokens[3], size=size)
-    if start is None or goal is None:
-        raise ValueError("maze prompt has an invalid endpoint")
-    wall_cells = [token_id_to_cell(token, size=size) for token in tokens[5:]]
-    if any(cell is None for cell in wall_cells):
-        raise ValueError("maze prompt has an invalid wall coordinate")
-    walls = frozenset(int(cell) for cell in wall_cells if cell is not None)
-    if len(walls) != len(wall_cells):
-        raise ValueError("maze prompt has duplicate walls")
+    itos: Dict[int, str],
+    input_representation: str,
+) -> MazeProblem:
+    try:
+        tokens = [itos[int(token_id)] for token_id in prompt_tokens]
+    except KeyError as error:
+        raise ValueError("maze prompt contains an unknown token") from error
+    if len(tokens) < 4 or tokens[0] != HEIGHT_TOKEN or tokens[2] != WIDTH_TOKEN:
+        raise ValueError("maze prompt has invalid dimension markers")
+    height, width = int(tokens[1]), int(tokens[3])
+    if input_representation == "sparse-cells":
+        if len(tokens) < 9 or tokens[4] != START_TOKEN or tokens[6] != GOAL_TOKEN or tokens[8] != WALLS_TOKEN:
+            raise ValueError("sparse maze prompt has invalid markers")
+        start = token_to_cell(tokens[5], width=width, height=height)
+        goal = token_to_cell(tokens[7], width=width, height=height)
+        wall_cells = [
+            token_to_cell(token, width=width, height=height)
+            for token in tokens[9:]
+        ]
+        if start is None or goal is None or any(cell is None for cell in wall_cells):
+            raise ValueError("sparse maze prompt contains an invalid cell")
+        walls = frozenset(int(cell) for cell in wall_cells if cell is not None)
+        if len(walls) != len(wall_cells):
+            raise ValueError("sparse maze prompt contains duplicate walls")
+    elif input_representation == "dense-cells":
+        if len(tokens) != 5 + width * height or tokens[4] != GRID_TOKEN:
+            raise ValueError("dense maze prompt has invalid dimensions")
+        walls_set = set()
+        starts = []
+        goals = []
+        for cell, symbol in enumerate(tokens[5:]):
+            if symbol == WALL_CELL_TOKEN:
+                walls_set.add(cell)
+            elif symbol == START_CELL_TOKEN:
+                starts.append(cell)
+            elif symbol == GOAL_CELL_TOKEN:
+                goals.append(cell)
+            elif symbol != OPEN_CELL_TOKEN:
+                raise ValueError("dense maze prompt contains an invalid symbol")
+        if len(starts) != 1 or len(goals) != 1:
+            raise ValueError("dense maze prompt must contain one start and goal")
+        start, goal, walls = starts[0], goals[0], frozenset(walls_set)
+    else:
+        raise ValueError(f"unsupported maze input representation: {input_representation}")
     if start == goal or start in walls or goal in walls:
-        raise ValueError("maze prompt has invalid start or goal cells")
-    return walls, start, goal
+        raise ValueError("maze prompt has invalid endpoints")
+    return MazeProblem(width, height, walls, start, goal)
+
+
+def decode_maze_target(
+    token_ids: Sequence[int],
+    *,
+    problem: MazeProblem,
+    itos: Dict[int, str],
+    target_representation: str,
+) -> tuple[bool, list[int | None]]:
+    if not token_ids:
+        return False, []
+    marker = itos.get(int(token_ids[0]))
+    body = token_ids[1:]
+    if target_representation == "cell-path":
+        path = [
+            token_to_cell(
+                itos.get(int(token_id), ""),
+                width=problem.width,
+                height=problem.height,
+            )
+            for token_id in body
+        ]
+        return marker == PATH_TOKEN, path
+    if target_representation == "actions":
+        path: list[int | None] = [problem.start]
+        for token_id in body:
+            previous = path[-1]
+            action = itos.get(int(token_id))
+            delta = ACTION_DELTAS.get(action) if action is not None else None
+            if previous is None or delta is None:
+                path.append(None)
+                continue
+            row, column = cell_to_coordinate(
+                previous,
+                width=problem.width,
+                height=problem.height,
+            )
+            row, column = row + delta[0], column + delta[1]
+            path.append(
+                row * problem.width + column
+                if 0 <= row < problem.height and 0 <= column < problem.width
+                else None
+            )
+        return marker == ACTIONS_TOKEN, path
+    raise ValueError(f"unsupported maze target representation: {target_representation}")
 
 
 __all__ = [
-    "CELL_TOKEN_OFFSET",
-    "GOAL_TOKEN",
-    "MAZE_DISTRIBUTIONS",
-    "MAX_SAMPLING_ATTEMPTS",
-    "MazeDistribution",
-    "MazeInstance",
-    "START_TOKEN",
-    "WALLS_TOKEN",
+    "ACTION_DELTAS",
+    "ACTIONS_TOKEN",
+    "CompiledMazeBundle",
+    "CompiledMazeDataset",
+    "DEFAULT_DATA_DIR",
+    "DEFAULT_SMOKE_DATA_DIR",
+    "INPUT_REPRESENTATIONS",
+    "MazeProblem",
+    "PATH_TOKEN",
+    "ROUTE_POLICIES",
+    "TARGET_REPRESENTATIONS",
     "build_maze_batch",
     "build_maze_vocab",
-    "cell_to_coordinate",
-    "coordinate_token",
-    "get_maze_distribution",
+    "decode_maze_target",
+    "load_maze_bundle",
+    "load_maze_dataset",
     "neighboring_cells",
     "parse_maze_prompt",
     "required_block_size",
-    "sample_maze_example",
-    "sample_random_wall_maze",
+    "resolve_compiled_dir",
     "solve_maze",
-    "token_id_to_cell",
 ]
