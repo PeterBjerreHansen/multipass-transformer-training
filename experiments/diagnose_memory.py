@@ -34,6 +34,7 @@ from experiments.train_trace import (
     validate_task_args as validate_trace_task_args,
 )
 from model_factory import is_multi_pass_architecture
+from models import shift_right
 
 
 def parse_args(argv: list[str] | None = None):
@@ -183,30 +184,31 @@ def memory_interventions(model, batch, *, seed: int) -> dict:
 
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    seq_len = previous_memory.shape[1]
+    read_memory = shift_right(previous_memory)
+    seq_len = read_memory.shape[1]
 
     # Each destination position j samples only from source positions <= j.
     # This disrupts position correspondence without moving future-derived
     # memories into an earlier readable location.
     causal_sources = torch.tensor(
         [int(torch.randint(0, position + 1, (1,), generator=generator).item()) for position in range(seq_len)],
-        device=previous_memory.device,
+        device=read_memory.device,
         dtype=torch.long,
     )
-    causal_resample = previous_memory[:, causal_sources, :]
+    causal_resample = read_memory[:, causal_sources, :]
 
-    counts = torch.arange(1, seq_len + 1, device=previous_memory.device, dtype=previous_memory.dtype)
-    causal_prefix_mean = previous_memory.cumsum(dim=1) / counts[None, :, None]
+    counts = torch.arange(1, seq_len + 1, device=read_memory.device, dtype=read_memory.dtype)
+    causal_prefix_mean = read_memory.cumsum(dim=1) / counts[None, :, None]
 
-    extra_lag = torch.zeros_like(previous_memory)
+    extra_lag = torch.zeros_like(read_memory)
     if seq_len > 1:
-        extra_lag[:, 1:, :] = previous_memory[:, :-1, :]
+        extra_lag[:, 1:, :] = read_memory[:, :-1, :]
 
-    zero_memory = torch.zeros_like(previous_memory)
+    zero_memory = torch.zeros_like(read_memory)
     interventions: dict[str, torch.Tensor] = {
-        "correct": previous_memory,
+        "correct": read_memory,
         "zero_memory_bank": zero_memory,
-        "cross_example": previous_memory.roll(1, dims=0),
+        "cross_example": read_memory.roll(1, dims=0),
         "causal_position_resample": causal_resample,
         "causal_prefix_mean": causal_prefix_mean,
         "extra_lag": extra_lag,
@@ -273,7 +275,7 @@ def pass_dynamics(model, batch, *, extra_passes: int) -> dict:
     previous_hidden = output.hidden_states
     continuation = []
     for offset in range(1, extra_passes + 1):
-        item = model.forward_pass(token_stream, memory)
+        item = model.forward_pass(token_stream, shift_right(memory))
         if item.memory_states is None:
             raise RuntimeError("extra pass did not emit memory states")
         continuation.append(
