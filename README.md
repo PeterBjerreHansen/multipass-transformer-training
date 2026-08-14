@@ -6,9 +6,9 @@ This project explores a way to train transformers for recurrent-style inference 
 > [*Full-bandwidth transformer*](https://arxiv.org/abs/2608.08888). The paper
 > independently develops the central multi-pass latent-feedback idea explored
 > here and validates it at much larger scale. It has stronger benchmarks and a
-> fuller analysis. If this repository interests you, read their paper first. 
-> I am glad to see the idea work in the big leagues. This repository remains 
-> a small testbed for explicit memory-tape variants and controlled state-tracking 
+> fuller analysis. If this repository interests you, read their paper first.
+> I am glad to see the idea work in the big leagues. This repository remains
+> a small testbed for explicit memory-tape variants and controlled state-tracking
 > experiments.
 
 ## A Motivating Problem: State Tracking
@@ -126,7 +126,7 @@ The plot above comes from an earlier architecture sweep. Some plotted variants a
 
 ## Multi-pass Architectures
 
-`main` supports two multi-pass memory designs. Both use the shared training and inference methods implemented by `MultiPassTransformer`.
+`main` supports three multi-pass designs. All use the shared training and inference methods implemented by `MultiPassTransformer`.
 
 The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full tape written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared wrapper performs the shift, final normalization, language-model head, and memory write. Each model defines only the decoder mapping $(X,R)$ to its pre-final hidden stream.
 
@@ -154,6 +154,22 @@ MemoryAdd keeps the ordinary token stream intact and learns a residual correctio
 > $`\textbf{for each causal decoder block:}`$<br>
 > &nbsp;&nbsp; $`H = \mathrm{DecoderBlock}(H)`$<br>
 
+### GLU Latent Feedback
+
+LatentFeedback follows the feedback transition proposed by Wang et al. The
+first pass is an ordinary transformer pass. Later passes use the previous
+top-layer hidden states as the memory tape and combine them with token
+embeddings through a gated linear unit before reusing the same decoder stack:
+
+```math
+H_{\mathrm{input}}^{(k)}
+= W_U\mathrm{Shift}(H^{(k-1)})
+  \odot \sigma(W_G\mathrm{LN}(X))
+```
+
+It shares the repository's relative pass-loss controls and append-recurrent
+inference contract rather than reproducing the paper's complete training setup.
+
 ## Tasks
 
 The repository has two task families:
@@ -165,7 +181,8 @@ Task generators and task-specific metrics live under `tasks/`. See [tasks/README
 
 ## Running experiments
 
-`main` supports `transformer`, `memory_tape`, and `memory_add`. The canonical launchers run preset-defined experiment matrices:
+`main` supports `transformer`, `memory_tape`, `memory_add`, and
+`latent_feedback`. The canonical launchers run all four by default:
 
 ```bash
 bash scripts/bbh/run.sh
@@ -177,7 +194,7 @@ Use environment variables to select tasks, architectures, seeds, the device, and
 ```bash
 DEVICE=mps \
 TASKS=shortest_path \
-ARCHITECTURES="transformer memory_tape memory_add" \
+ARCHITECTURES="transformer memory_tape memory_add latent_feedback" \
 SEEDS="1337 2027 4099" \
 RESULT_ROOT=results/trace \
 bash scripts/trace/run.sh
@@ -253,6 +270,21 @@ python3 -m experiments.train_bbh \
   --preset permutation_main \
   --architecture memory_add
 ```
+
+LatentFeedback with a checkpointed probabilistic training-depth schedule:
+
+```bash
+python3 -m experiments.train_bbh \
+  --preset permutation_main \
+  --architecture latent_feedback \
+  --max-passes 3 \
+  --pass-loss-weights 1 1 \
+  --train-pass-schedule "1=1:1" "25001=1:3,2:1" "37501=1:5,2:3,3:2"
+```
+
+Pass-loss weights are aligned to the deepest active passes. For example,
+`--pass-loss-weights 1 1` becomes `[1]` at one pass, `[1, 1]` at two passes,
+and `[0, 0, 1, 1]` at four passes. Evaluation always uses `--max-passes`.
 
 ## Requirements
 

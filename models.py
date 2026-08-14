@@ -91,12 +91,14 @@ class TransformerConfig:
 
 @dataclass
 class MultiPassConfig(TransformerConfig):
-    n_pass: int = 4
+    max_passes: int = 4
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.n_pass < 2:
-            raise ValueError(f"n_pass ({self.n_pass}) must be at least 2 for multi-pass models")
+        if self.max_passes < 2:
+            raise ValueError(
+                f"max_passes ({self.max_passes}) must be at least 2 for multi-pass models"
+            )
 
 
 @dataclass
@@ -227,19 +229,23 @@ def shift_right(memory: torch.Tensor) -> torch.Tensor:
 
 def normalize_pass_weights(
     weights: Sequence[float] | None,
-    n_pass: int,
+    passes: int,
     *,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    if n_pass < 1:
-        raise ValueError("n_pass must be positive")
+    if passes < 1:
+        raise ValueError("passes must be positive")
     if weights is None:
-        result = torch.ones(n_pass, device=device, dtype=dtype)
+        result = torch.ones(passes, device=device, dtype=dtype)
     else:
-        if len(weights) != n_pass:
-            raise ValueError("loss_weights must match number of recurrent passes")
-        result = torch.as_tensor(weights, device=device, dtype=dtype)
+        if not weights:
+            raise ValueError("loss_weights must not be empty")
+        if len(weights) > passes:
+            selected = weights[-passes:]
+        else:
+            selected = [0.0] * (passes - len(weights)) + list(weights)
+        result = torch.as_tensor(selected, device=device, dtype=dtype)
 
     if not torch.isfinite(result).all():
         raise ValueError("loss_weights must be finite")
@@ -388,7 +394,6 @@ class CausalTransformer(nn.Module):
 
 class MultiPassTransformer(nn.Module):
     block_cls: type[nn.Module] | None = None
-    uses_memory_writer = True
 
     def __init__(self, config: MultiPassConfig):
         super().__init__()
@@ -404,9 +409,6 @@ class MultiPassTransformer(nn.Module):
             }
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        if self.uses_memory_writer:
-            self.ln_mem = LayerNorm(config.n_embd)
-            self.mem_head = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
     def finish_initialization(self) -> None:
         self.apply(self._init_weights)
@@ -441,46 +443,30 @@ class MultiPassTransformer(nn.Module):
         positions = torch.arange(seq_len, device=idx.device)
         return self.transformer.wte(idx) + self.transformer.wpe(positions)[None, :, :]
 
-    def write_memory(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if not self.uses_memory_writer:
-            return hidden_states
-        return self.mem_head(self.ln_mem(hidden_states))
+    def forward_pass(
+        self,
+        token_stream: torch.Tensor,
+        read_memory: torch.Tensor | None,
+    ) -> PassOutput:
+        raise NotImplementedError
 
-    def _finish_pass(self, hidden: torch.Tensor) -> PassOutput:
-        hidden = self.transformer.ln_f(hidden)
-        return PassOutput(
-            logits=self.lm_head(hidden),
-            hidden_states=hidden,
-            memory_states=self.write_memory(hidden),
-        )
-
-    def _run_initial_pass(self, token_stream: torch.Tensor) -> torch.Tensor:
-        return self._run_full_pass(token_stream, torch.zeros_like(token_stream))
-
-    def forward_pass(self, token_stream: torch.Tensor, previous_memory: torch.Tensor) -> PassOutput:
-        if token_stream.shape != previous_memory.shape:
-            raise ValueError("token_stream and previous_memory must have the same shape")
-        memory_tape = shift_right(previous_memory)
-        hidden = self._run_full_pass(token_stream, memory_tape)
-        return self._finish_pass(hidden)
-
-    def forward(self, idx: torch.Tensor, *, n_pass: int | None = None) -> MultiPassOutput:
-        effective_n_pass = self.config.n_pass if n_pass is None else int(n_pass)
-        if effective_n_pass < 1:
-            raise ValueError("n_pass must be at least 1")
+    def forward(self, idx: torch.Tensor, *, passes: int | None = None) -> MultiPassOutput:
+        effective_passes = self.config.max_passes if passes is None else int(passes)
+        if not 1 <= effective_passes <= self.config.max_passes:
+            raise ValueError(f"passes must be between 1 and {self.config.max_passes}")
         token_stream = self.embed_tokens(idx)
-        initial = self._finish_pass(self._run_initial_pass(token_stream))
-        passes = [initial]
+        initial = self.forward_pass(token_stream, None)
+        outputs = [initial]
         previous_memory = initial.memory_states
         if previous_memory is None:
             raise RuntimeError("multi-pass model failed to emit memory states")
-        for _ in range(1, effective_n_pass):
-            output = self.forward_pass(token_stream, previous_memory)
-            passes.append(output)
+        for _ in range(1, effective_passes):
+            output = self.forward_pass(token_stream, shift_right(previous_memory))
+            outputs.append(output)
             previous_memory = output.memory_states
             if previous_memory is None:
                 raise RuntimeError("multi-pass model failed to emit memory states")
-        return MultiPassOutput(tuple(passes))
+        return MultiPassOutput(tuple(outputs))
 
     @staticmethod
     def calc_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -542,7 +528,7 @@ class MultiPassTransformer(nn.Module):
         )
         previous_memory = torch.cat((state.memory_states, placeholder), dim=1)
         token_stream = self.embed_tokens(tokens)
-        output = self.forward_pass(token_stream, previous_memory)
+        output = self.forward_pass(token_stream, shift_right(previous_memory))
         if output.memory_states is None:
             raise RuntimeError("recurrent pass failed to emit memory states")
         appended_memory = output.memory_states[:, -1:, :]
@@ -610,32 +596,43 @@ class MultiPassTransformer(nn.Module):
         finally:
             self.train(was_training)
 
-    def _run_full_pass(self, token_stream: torch.Tensor, memory_tape: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
 class MemoryAddTransformer(MultiPassTransformer):
 
     block_cls = Block
 
     def __init__(self, config: MultiPassConfig):
         super().__init__(config)
+        self.ln_mem = LayerNorm(config.n_embd)
+        self.mem_head = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.mem_in_ln = LayerNorm(config.n_embd)
         self.memory_projection = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.finish_initialization()
         nn.init.normal_(self.memory_projection.weight, mean=0.0, std=1e-3)
 
-    def _run_full_pass(self, token_stream: torch.Tensor, memory_tape: torch.Tensor) -> torch.Tensor:
-        hidden = token_stream + self.memory_projection(self.mem_in_ln(memory_tape))
+    def forward_pass(
+        self,
+        token_stream: torch.Tensor,
+        read_memory: torch.Tensor | None,
+    ) -> PassOutput:
+        if read_memory is None:
+            read_memory = torch.zeros_like(token_stream)
+        if token_stream.shape != read_memory.shape:
+            raise ValueError("token_stream and read_memory must have the same shape")
+        hidden = token_stream + self.memory_projection(self.mem_in_ln(read_memory))
         for block in self.transformer.h:
             hidden = block(hidden)
-        return hidden
+        hidden = self.transformer.ln_f(hidden)
+        return PassOutput(
+            logits=self.lm_head(hidden),
+            hidden_states=hidden,
+            memory_states=self.mem_head(self.ln_mem(hidden)),
+        )
 
 
 class LatentFeedbackTransformer(MultiPassTransformer):
     """Top-layer latent feedback from Wang et al., arXiv:2608.08888."""
 
     block_cls = Block
-    uses_memory_writer = False
 
     def __init__(self, config: MultiPassConfig):
         super().__init__(config)
@@ -644,51 +641,30 @@ class LatentFeedbackTransformer(MultiPassTransformer):
         self.feedback_gate = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.finish_initialization()
 
-    def _decode(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward_pass(
+        self,
+        token_stream: torch.Tensor,
+        read_memory: torch.Tensor | None,
+    ) -> PassOutput:
+        if read_memory is None:
+            hidden = token_stream
+        else:
+            if token_stream.shape != read_memory.shape:
+                raise ValueError("token_stream and read_memory must have the same shape")
+            hidden = self.feedback_value(read_memory) * torch.sigmoid(
+                self.feedback_gate(self.feedback_input_ln(token_stream))
+            )
+            hidden = self.feedback_input_ln(hidden)
+            hidden = torch.cat((token_stream[:, :1, :], hidden[:, 1:, :]), dim=1)
         for block in self.transformer.h:
             hidden = block(hidden)
-        return hidden
-
-    def _run_initial_pass(self, token_stream: torch.Tensor) -> torch.Tensor:
-        return self._decode(token_stream)
-
-    def fuse_feedback(
-        self,
-        token_stream: torch.Tensor,
-        shifted_hidden: torch.Tensor,
-    ) -> torch.Tensor:
-        if token_stream.shape != shifted_hidden.shape:
-            raise ValueError("token_stream and shifted_hidden must have the same shape")
-        fused = self.feedback_value(shifted_hidden) * torch.sigmoid(
-            self.feedback_gate(self.feedback_input_ln(token_stream))
+        hidden = self.transformer.ln_f(hidden)
+        return PassOutput(
+            logits=self.lm_head(hidden),
+            hidden_states=hidden,
+            memory_states=hidden,
         )
-        fused = self.feedback_input_ln(fused)
-        return torch.cat((token_stream[:, :1, :], fused[:, 1:, :]), dim=1)
 
-    def _run_full_pass(
-        self,
-        token_stream: torch.Tensor,
-        memory_tape: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._decode(self.fuse_feedback(token_stream, memory_tape))
-
-    def calc_total_loss(
-        self,
-        output_or_logits: MultiPassOutput | Sequence[torch.Tensor],
-        targets: torch.Tensor,
-        loss_weights: Sequence[float] | None = None,
-    ) -> LossOutput:
-        if loss_weights is not None:
-            raise ValueError("latent feedback uses its fixed standard-plus-feedback objective")
-        if isinstance(output_or_logits, MultiPassOutput):
-            logits_per_pass = output_or_logits.logits_per_pass
-        else:
-            logits_per_pass = tuple(output_or_logits)
-        losses = tuple(self.calc_loss(logits, targets) for logits in logits_per_pass)
-        total = losses[0]
-        if len(losses) > 1:
-            total = total + torch.stack(losses[1:]).mean()
-        return LossOutput(loss=total, pass_losses=losses)
 
 class MemoryBlock(nn.Module):
     def __init__(self, config: MemoryTapeConfig):
@@ -714,16 +690,32 @@ class MemoryTapeTransformer(MultiPassTransformer):
 
     def __init__(self, config: MemoryTapeConfig):
         super().__init__(config)
+        self.ln_mem = LayerNorm(config.n_embd)
+        self.mem_head = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.finish_initialization()
         with torch.no_grad():
             for block in self.transformer.h:
                 block.cross_attn.c_proj.weight.mul_(1.0)
 
-    def _run_full_pass(self, token_stream: torch.Tensor, memory_tape: torch.Tensor) -> torch.Tensor:
+    def forward_pass(
+        self,
+        token_stream: torch.Tensor,
+        read_memory: torch.Tensor | None,
+    ) -> PassOutput:
+        if read_memory is None:
+            read_memory = torch.zeros_like(token_stream)
+        if token_stream.shape != read_memory.shape:
+            raise ValueError("token_stream and read_memory must have the same shape")
         hidden = token_stream
         for block in self.transformer.h:
-            hidden = block(hidden, memory_tape)
-        return hidden
+            hidden = block(hidden, read_memory)
+        hidden = self.transformer.ln_f(hidden)
+        return PassOutput(
+            logits=self.lm_head(hidden),
+            hidden_states=hidden,
+            memory_states=self.mem_head(self.ln_mem(hidden)),
+        )
+
 
 def _validate_generation_inputs(ids: torch.Tensor, max_new_tokens: int) -> None:
     if ids.ndim != 2:

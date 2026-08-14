@@ -19,7 +19,7 @@ from experiments.train_trace import parse_args as parse_trace_args
 from models import LatentFeedbackTransformer, MultiPassConfig
 
 
-def tiny_model(*, n_pass: int = 3) -> LatentFeedbackTransformer:
+def tiny_model(*, max_passes: int = 3) -> LatentFeedbackTransformer:
     torch.manual_seed(11)
     return LatentFeedbackTransformer(
         MultiPassConfig(
@@ -28,34 +28,42 @@ def tiny_model(*, n_pass: int = 3) -> LatentFeedbackTransformer:
             n_layer=2,
             n_head=2,
             n_embd=8,
-            n_pass=n_pass,
+            max_passes=max_passes,
         )
     )
 
 
-def test_glu_feedback_matches_paper_equation_and_preserves_first_position():
+def test_glu_feedback_forward_matches_paper_equation():
     model = tiny_model()
     tokens = torch.randint(0, 17, (2, 6))
     embeddings = model.embed_tokens(tokens)
-    shifted_hidden = torch.randn_like(embeddings)
+    read_memory = torch.randn_like(embeddings)
+    read_memory[:, 0] = 0
 
-    expected = model.feedback_value(shifted_hidden) * torch.sigmoid(
+    expected = model.feedback_value(read_memory) * torch.sigmoid(
         model.feedback_gate(model.feedback_input_ln(embeddings))
     )
     expected = model.feedback_input_ln(expected)
     expected[:, 0] = embeddings[:, 0]
+    for block in model.transformer.h:
+        expected = block(expected)
+    expected = model.transformer.ln_f(expected)
 
-    actual = model.fuse_feedback(embeddings, shifted_hidden)
-    assert torch.equal(actual, expected)
+    actual = model.forward_pass(embeddings, read_memory)
+    assert torch.equal(actual.hidden_states, expected)
+    assert torch.equal(actual.memory_states, expected)
 
 
 def test_first_pass_is_plain_transformer_and_memory_is_top_layer_state():
     model = tiny_model()
     tokens = torch.randint(0, 17, (2, 6))
     token_stream = model.embed_tokens(tokens)
-    expected_hidden = model.transformer.ln_f(model._decode(token_stream))
+    expected_hidden = token_stream
+    for block in model.transformer.h:
+        expected_hidden = block(expected_hidden)
+    expected_hidden = model.transformer.ln_f(expected_hidden)
 
-    output = model(tokens, n_pass=1)
+    output = model(tokens, passes=1)
 
     assert len(output.passes) == 1
     assert torch.equal(output.hidden_states, expected_hidden)
@@ -65,35 +73,35 @@ def test_first_pass_is_plain_transformer_and_memory_is_top_layer_state():
 
 
 def test_forward_uses_requested_fixed_pass_count_without_mutating_config():
-    model = tiny_model(n_pass=3)
+    model = tiny_model(max_passes=3)
     tokens = torch.randint(0, 17, (2, 6))
 
     assert len(model(tokens).passes) == 3
-    assert len(model(tokens, n_pass=1).passes) == 1
-    assert len(model(tokens, n_pass=2).passes) == 2
-    assert model.config.n_pass == 3
-    with pytest.raises(ValueError, match="at least 1"):
-        model(tokens, n_pass=0)
+    assert len(model(tokens, passes=1).passes) == 1
+    assert len(model(tokens, passes=2).passes) == 2
+    assert model.config.max_passes == 3
+    with pytest.raises(ValueError, match="between 1 and 3"):
+        model(tokens, passes=0)
+    with pytest.raises(ValueError, match="between 1 and 3"):
+        model(tokens, passes=4)
 
 
-def test_loss_is_standard_pass_plus_mean_feedback_passes():
-    model = tiny_model(n_pass=3)
+def test_latent_feedback_uses_generic_relative_pass_weights():
+    model = tiny_model(max_passes=3)
     tokens = torch.randint(0, 17, (2, 6))
     targets = torch.randint(0, 17, (2, 6))
 
     output = model(tokens)
-    result = model.calc_total_loss(output, targets)
-    expected = result.pass_losses[0] + torch.stack(result.pass_losses[1:]).mean()
+    result = model.calc_total_loss(output, targets, [1, 1])
+    expected = torch.stack(result.pass_losses[-2:]).mean()
 
     assert torch.equal(result.loss, expected)
-    one_pass = model.calc_total_loss(model(tokens, n_pass=1), targets)
+    one_pass = model.calc_total_loss(model(tokens, passes=1), targets, [1, 1])
     assert torch.equal(one_pass.loss, one_pass.pass_losses[0])
-    with pytest.raises(ValueError, match="fixed standard-plus-feedback"):
-        model.calc_total_loss(output, targets, [0, 0, 1])
 
 
 def test_feedback_loss_backpropagates_through_earlier_pass_state():
-    model = tiny_model(n_pass=2)
+    model = tiny_model(max_passes=2)
     tokens = torch.randint(0, 17, (2, 6))
     targets = torch.randint(0, 17, (2, 6))
     output = model(tokens)
@@ -111,7 +119,7 @@ def test_feedback_loss_backpropagates_through_earlier_pass_state():
 
 
 def test_latent_feedback_is_causal_at_every_pass():
-    model = tiny_model(n_pass=3)
+    model = tiny_model(max_passes=3)
     model.eval()
     prefix = torch.tensor([[1, 2, 3, 4]])
     first = torch.cat((prefix, torch.tensor([[5, 6]])), dim=1)
@@ -175,20 +183,22 @@ def test_scheduler_state_restores_the_exact_sampling_sequence():
     assert restored.stats() == first.stats()
 
 
-def test_scheduler_is_limited_to_latent_feedback_and_configured_maximum():
+def test_scheduler_supports_multipass_models_and_respects_configured_maximum():
     args = SimpleNamespace(
         architecture="latent_feedback",
-        n_pass=3,
+        max_passes=3,
         train_pass_schedule=["1=1:1,3:1"],
     )
     assert build_pass_scheduler(args, seed=1) is not None
 
     args.architecture = "memory_tape"
-    with pytest.raises(ValueError, match="requires --architecture latent_feedback"):
+    assert build_pass_scheduler(args, seed=1) is not None
+    args.architecture = "transformer"
+    with pytest.raises(ValueError, match="requires a multi-pass architecture"):
         build_pass_scheduler(args, seed=1)
     args.architecture = "latent_feedback"
-    args.n_pass = 2
-    with pytest.raises(ValueError, match="cannot exceed --n-pass"):
+    args.max_passes = 2
+    with pytest.raises(ValueError, match="cannot exceed --max-passes"):
         build_pass_scheduler(args, seed=1)
 
 
@@ -214,7 +224,7 @@ def test_bbh_smoke_checkpoint_contains_scheduler_state(tmp_path: Path):
         "permutation_smoke",
         "--architecture",
         "latent_feedback",
-        "--n-pass",
+        "--max-passes",
         "3",
         "--train-pass-schedule",
         "1=2:1",

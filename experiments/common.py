@@ -77,15 +77,12 @@ def validate_model_args(args) -> None:
         args.inference_mode = "recompute"
         return
 
-    if args.n_pass < 2:
-        raise ValueError("--n-pass must be at least 2 for multi-pass architectures")
-    if args.architecture == "latent_feedback":
-        args.pass_loss_weights = None
-        return
+    if args.max_passes < 2:
+        raise ValueError("--max-passes must be at least 2 for multi-pass architectures")
     if args.pass_loss_weights is None:
-        args.pass_loss_weights = [1.0] * args.n_pass
-    if len(args.pass_loss_weights) != args.n_pass:
-        raise ValueError("--pass-loss-weights must match --n-pass")
+        args.pass_loss_weights = [1.0] * args.max_passes
+    if not 1 <= len(args.pass_loss_weights) <= args.max_passes:
+        raise ValueError("--pass-loss-weights must contain between 1 and --max-passes values")
     weights = torch.tensor(args.pass_loss_weights, dtype=torch.float64)
     if not torch.isfinite(weights).all():
         raise ValueError("--pass-loss-weights must be finite")
@@ -282,10 +279,10 @@ def effective_inference_mode(args, requested_mode: str | None = None) -> str:
     return requested_mode or args.inference_mode
 
 
-def forward_and_loss(model, batch, args, *, n_pass: int | None = None):
-    if n_pass is not None and not is_multi_pass_architecture(args.architecture):
-        raise ValueError("n_pass overrides require a multi-pass architecture")
-    output = model(batch.idx, n_pass=n_pass) if n_pass is not None else model(batch.idx)
+def forward_and_loss(model, batch, args, *, passes: int | None = None):
+    if passes is not None and not is_multi_pass_architecture(args.architecture):
+        raise ValueError("pass overrides require a multi-pass architecture")
+    output = model(batch.idx, passes=passes) if passes is not None else model(batch.idx)
     if not is_multi_pass_architecture(args.architecture):
         loss = model.calc_loss(output.logits, batch.targets)
         return loss, output, (loss.detach(),)

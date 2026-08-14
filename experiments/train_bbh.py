@@ -131,7 +131,7 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-layer", type=int)
     _add_override(parser, "--n-head", type=int)
     _add_override(parser, "--n-embd", type=int)
-    _add_override(parser, "--n-pass", type=int)
+    _add_override(parser, "--max-passes", type=int)
     _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
     _add_override(
         parser,
@@ -262,7 +262,7 @@ def run_answer_curriculum(args) -> None:
     validate_task_args(args)
     pass_scheduler = build_pass_scheduler(
         args,
-        seed=stable_seed(args.seed, "latent-feedback", "pass-schedule"),
+        seed=stable_seed(args.seed, "pass-schedule"),
     )
     task, block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
     artifacts = prepare_run_artifacts(
@@ -299,12 +299,9 @@ def run_answer_curriculum(args) -> None:
     print(f"block_size: {block_size}")
     print(f"parameters: {model.get_num_params():,}")
     if args.architecture != "transformer":
-        print(f"n_pass: {args.n_pass}")
-        if args.architecture == "latent_feedback":
-            print("pass_loss_objective: standard + mean(feedback passes)")
-        else:
-            normalized = [weight / sum(args.pass_loss_weights) for weight in args.pass_loss_weights]
-            print(f"pass_loss_weights_normalized: {normalized}")
+        print(f"max_passes: {args.max_passes}")
+        normalized = [weight / sum(args.pass_loss_weights) for weight in args.pass_loss_weights]
+        print(f"relative_pass_loss_weights_normalized: {normalized}")
     if pass_scheduler is not None:
         print(f"train_pass_schedule: {args.train_pass_schedule}")
     append_jsonl(
@@ -337,12 +334,12 @@ def run_answer_curriculum(args) -> None:
             rng=train_rng,
         )
         optimizer.zero_grad(set_to_none=True)
-        sampled_n_pass = pass_scheduler.sample(step) if pass_scheduler is not None else None
+        sampled_passes = pass_scheduler.sample(step) if pass_scheduler is not None else None
         loss, _output, pass_losses = forward_and_loss(
             model,
             batch,
             args,
-            n_pass=sampled_n_pass,
+            passes=sampled_passes,
         )
         loss.backward()
         update_gradient_norm_window(gradient_norm_window, gradient_norms(model))
@@ -362,8 +359,8 @@ def run_answer_curriculum(args) -> None:
         fields.append(format_gradient_norms(gradient_summary))
         if args.architecture != "transformer":
             fields.append(f"pass_losses {format_pass_losses(pass_losses)}")
-        if sampled_n_pass is not None:
-            fields.append(f"sampled_passes {sampled_n_pass}")
+        if sampled_passes is not None:
+            fields.append(f"sampled_passes {sampled_passes}")
         print(format_checkpoint_line(f"step {step}", fields))
 
         evaluated_level = current_level

@@ -29,26 +29,26 @@ def parse_pass_schedule(specifications: Sequence[str]) -> tuple[PassSchedulePhas
         for entry in mixture_text.split(","):
             try:
                 pass_text, weight_text = entry.split(":", maxsplit=1)
-                n_pass = int(pass_text)
+                passes = int(pass_text)
                 weight = float(weight_text)
             except (TypeError, ValueError) as error:
                 raise ValueError(
                     "pass schedule mixtures must use PASS:WEIGHT,..."
                 ) from error
-            if n_pass in weights:
-                raise ValueError(f"duplicate pass count in phase: {n_pass}")
-            weights[n_pass] = weight
+            if passes in weights:
+                raise ValueError(f"duplicate pass count in phase: {passes}")
+            weights[passes] = weight
 
         if not weights:
             raise ValueError("pass schedule mixtures must not be empty")
-        if any(n_pass < 1 for n_pass in weights):
+        if any(passes < 1 for passes in weights):
             raise ValueError("scheduled pass counts must be positive")
         if any(not math.isfinite(weight) or weight <= 0 for weight in weights.values()):
             raise ValueError("pass schedule weights must be finite and positive")
         total = sum(weights.values())
         probabilities = tuple(
-            (n_pass, weight / total)
-            for n_pass, weight in sorted(weights.items())
+            (passes, weight / total)
+            for passes, weight in sorted(weights.items())
         )
         phases.append(PassSchedulePhase(start_step, probabilities))
 
@@ -71,7 +71,7 @@ class ProbabilisticPassScheduler:
 
     @property
     def maximum_passes(self) -> int:
-        return max(n_pass for phase in self.phases for n_pass, _ in phase.probabilities)
+        return max(passes for phase in self.phases for passes, _ in phase.probabilities)
 
     def phase_at(self, step: int) -> PassSchedulePhase:
         if step < 1:
@@ -88,10 +88,10 @@ class ProbabilisticPassScheduler:
         draw = self.rng.random()
         cumulative = 0.0
         selected = phase.probabilities[-1][0]
-        for n_pass, probability in phase.probabilities:
+        for passes, probability in phase.probabilities:
             cumulative += probability
             if draw < cumulative:
-                selected = n_pass
+                selected = passes
                 break
         self.sample_count += 1
         self.histogram[selected] = self.histogram.get(selected, 0) + 1
@@ -120,9 +120,9 @@ def build_pass_scheduler(args, *, seed: int) -> ProbabilisticPassScheduler | Non
     specifications = getattr(args, "train_pass_schedule", None)
     if not specifications:
         return None
-    if args.architecture != "latent_feedback":
-        raise ValueError("--train-pass-schedule currently requires --architecture latent_feedback")
+    if args.architecture == "transformer":
+        raise ValueError("--train-pass-schedule requires a multi-pass architecture")
     scheduler = ProbabilisticPassScheduler(specifications, seed=seed)
-    if scheduler.maximum_passes > args.n_pass:
-        raise ValueError("scheduled pass count cannot exceed --n-pass")
+    if scheduler.maximum_passes > args.max_passes:
+        raise ValueError("scheduled pass count cannot exceed --max-passes")
     return scheduler

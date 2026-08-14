@@ -585,8 +585,8 @@ def test_runtime_resource_stats_reports_peak_rss():
 def test_main_bbh_preset_contract_is_frozen():
     common = {
         "model_size": "small",
-        "n_pass": 4,
-        "pass_loss_weights": [0.0, 0.0, 1.0, 1.0],
+        "max_passes": 4,
+        "pass_loss_weights": [1.0, 1.0],
         "batch_size": 64,
         "train_steps": 50_000,
         "lr": 1e-4,
@@ -634,8 +634,8 @@ def test_main_bbh_preset_contract_is_frozen():
 def test_main_trace_preset_contract_is_frozen():
     common = {
         "model_size": "small",
-        "n_pass": 4,
-        "pass_loss_weights": [0.0, 0.0, 1.0, 1.0],
+        "max_passes": 4,
+        "pass_loss_weights": [1.0, 1.0],
         "max_grad_norm": 5.0,
         "weight_decay": 0.0,
         "seed": 1337,

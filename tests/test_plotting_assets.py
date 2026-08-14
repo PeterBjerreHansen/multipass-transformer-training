@@ -127,7 +127,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
                     "preset": "shortest_path_main",
                     "seed": 1337,
                     "device": "cpu",
-                    "n_pass": 4,
+                    "max_passes": 4,
                     "shortest_path_distribution": "main",
                     "shortest_path_data_dir": "data/shortest_path/main",
                     "shortest_path_dataset_id": "a" * 64,
