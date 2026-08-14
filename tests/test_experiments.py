@@ -549,6 +549,7 @@ def test_othello_prefix_examples_and_legal_set_metrics_are_deterministic():
 def test_trace_registry_preserves_seeded_task_behavior(tmp_path):
     othello_args = SimpleNamespace(
         batch_size=3,
+        eval_batches=1,
         device="cpu",
         othello_data_dir=str(tmp_path / "othello"),
         othello_train_games=8,
@@ -584,6 +585,45 @@ def test_trace_registry_preserves_seeded_task_behavior(tmp_path):
     )
     assert torch.equal(registered_othello_batch.idx, direct_othello_batch.idx)
     assert torch.equal(registered_othello_batch.targets, direct_othello_batch.targets)
+    first_eval = othello_task.build_eval_batches(
+        othello_args,
+        direct_othello_vocab[1],
+        split=othello_task.validation_split,
+    )
+    second_eval = othello_task.build_eval_batches(
+        othello_args,
+        direct_othello_vocab[1],
+        split=othello_task.validation_split,
+    )
+    assert len(first_eval) == len(second_eval) == 1
+    assert torch.equal(first_eval[0].idx, second_eval[0].idx)
+    metadata = othello_task.evaluation_metadata(
+        othello_args,
+        split=othello_task.validation_split,
+    )
+    assert metadata["dataset_split"] == "validation"
+    assert len(metadata["othello_dataset_id"]) == 64
+
+
+def test_trace_registry_rejects_an_othello_dataset_id_mismatch(tmp_path):
+    args = SimpleNamespace(
+        othello_data_dir=str(tmp_path / "othello"),
+        othello_train_games=8,
+        othello_val_games=4,
+        othello_dataset_seed=31,
+        othello_dataset_id="0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="Othello dataset ID mismatch"):
+        TRACE_TASKS["othello"].build_vocab(args)
+
+
+def test_every_trace_task_owns_evaluation_selection_and_metadata():
+    for task in TRACE_TASKS.values():
+        assert callable(task.build_eval_batches_fn)
+        assert callable(task.evaluation_metadata_fn)
+        assert task.validation_split
+        assert task.evaluation_split
 
 
 def test_runtime_resource_stats_reports_peak_rss():

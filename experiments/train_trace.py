@@ -158,16 +158,10 @@ def build_task_batch(args, stoi, rng: random.Random, *, split: str):
     return get_trace_task(args.task).build_batch(args, stoi, rng, split=split)
 
 
-def build_fixed_eval_batches(args, stoi, *, split: str = "val"):
+def build_fixed_eval_batches(args, stoi, *, split: str | None = None):
     task = get_trace_task(args.task)
-    compiled_batches = task.build_eval_batches(args, stoi, split=split)
-    if compiled_batches is not None:
-        return compiled_batches
-    rng = random.Random(stable_seed(args.seed, "trace", args.task, "eval"))
-    return [
-        build_task_batch(args, stoi, rng, split=split)
-        for _ in range(args.eval_batches)
-    ]
+    selected_split = task.validation_split if split is None else split
+    return task.build_eval_batches(args, stoi, split=selected_split)
 
 
 def trace_generation_metrics(model, batch, args, *, inference_mode: str | None = None):
@@ -233,9 +227,15 @@ def run_trace_training(args) -> None:
         seed=stable_seed(args.seed, "pass-schedule"),
     )
     block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
-    extra_config = {"script": "experiments.train_trace"}
-    if args.task in {"maze", "shortest_path"}:
-        extra_config["training_evaluation_split"] = "validation"
+    task = get_trace_task(args.task)
+    validation_metadata = task.evaluation_metadata(
+        args,
+        split=task.validation_split,
+    )
+    extra_config = {
+        "script": "experiments.train_trace",
+        "training_evaluation_split": validation_metadata["dataset_split"],
+    }
     artifacts = prepare_run_artifacts(
         args,
         model=model,
@@ -288,8 +288,7 @@ def run_trace_training(args) -> None:
         "config": vars(args),
         "model_stats": model_benchmark_stats(model),
     }
-    if args.task in {"maze", "shortest_path"}:
-        run_event["dataset_split"] = "validation"
+    run_event.update(validation_metadata)
     append_jsonl(artifacts.metrics_path, run_event)
 
     fixed_eval_batches = build_fixed_eval_batches(args, stoi)
@@ -372,8 +371,7 @@ def run_trace_training(args) -> None:
         }
         if pass_scheduler is not None:
             eval_event["pass_schedule"] = pass_scheduler.stats()
-        if args.task in {"maze", "shortest_path"}:
-            eval_event["dataset_split"] = "validation"
+        eval_event.update(validation_metadata)
         append_jsonl(artifacts.metrics_path, eval_event)
         checkpoint_extra = {
             "train_rng_state": train_rng.getstate(),

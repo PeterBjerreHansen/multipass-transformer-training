@@ -547,12 +547,11 @@ def diagnose_memory(cli_args) -> Path:
     }
     if bbh_level is not None:
         payload["evaluated_level"] = bbh_level
-    if args.task in {"maze", "shortest_path"}:
-        payload["dataset_split"] = "validation"
-    if args.task == "maze":
-        payload["maze_dataset_id"] = args.maze_dataset_id
-    elif args.task == "shortest_path":
-        payload["shortest_path_dataset_id"] = args.shortest_path_dataset_id
+    if args.task in TRACE_TASKS:
+        task = TRACE_TASKS[args.task]
+        payload.update(
+            task.evaluation_metadata(args, split=task.validation_split)
+        )
     output = Path(cli_args.output).resolve() if cli_args.output else run_dir / "diagnostics.json"
     write_json(output, payload)
     print(f"wrote {output}")

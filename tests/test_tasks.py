@@ -11,6 +11,7 @@ from models import CausalTransformer, TransformerConfig
 from tasks.bbh import permutation, pointer_chasing, state_machine, tracking
 from tasks.common import build_batch_from_sequences, make_sequence
 from tasks.trace import maze, maze_eval, othello, shortest_path
+from tasks.trace.compiled import deterministic_eval_indices, training_indices
 from tasks.trace import shortest_path_eval
 
 
@@ -20,6 +21,28 @@ class _ForcedChoiceRandom(random.Random):
     def choices(self, population, weights=None, *, cum_weights=None, k=1):
         assert self.forced_choice in population
         return [self.forced_choice] * k
+
+
+def test_compiled_trace_index_helpers_are_seeded_and_without_replacement():
+    first_train = training_indices(10, 20, random.Random(17))
+    second_train = training_indices(10, 20, random.Random(17))
+    assert first_train == second_train
+    assert len(first_train) == 20
+
+    first_eval = deterministic_eval_indices(
+        dataset_id="dataset-a",
+        split="test",
+        dataset_size=10,
+        count=8,
+    )
+    second_eval = deterministic_eval_indices(
+        dataset_id="dataset-a",
+        split="test",
+        dataset_size=10,
+        count=8,
+    )
+    assert first_eval == second_eval
+    assert len(first_eval) == len(set(first_eval)) == 8
 
 
 def test_bbh_task_solvers_match_sampled_answers():

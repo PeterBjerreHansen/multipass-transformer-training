@@ -11,9 +11,14 @@ import re
 from typing import Dict, Sequence, Tuple
 
 import numpy as np
-import torch
 
 from tasks.common import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, SEP_TOKEN, SymbolicBatch
+from tasks.trace.compiled import (
+    batch_from_compiled_indices,
+    chunk_indices,
+    deterministic_eval_indices,
+    training_indices,
+)
 
 
 INPUT_REPRESENTATIONS = ("dense-cells", "sparse-cells")
@@ -61,10 +66,6 @@ class CompiledMazeDataset:
 
     def __len__(self) -> int:
         return int(self.tokens.shape[0])
-
-    def sample_indices(self, count: int, rng: random.Random) -> list[int]:
-        return [rng.randrange(len(self)) for _ in range(count)]
-
 
 @dataclass(frozen=True)
 class CompiledMazeBundle:
@@ -338,36 +339,12 @@ def build_maze_batch(
         target_representation=target_representation,
         route_policy=route_policy,
     )
-    indices = dataset.sample_indices(batch_size, rng)
-    return _batch_from_indices(dataset, bundle, indices, device=device)
-
-
-def _batch_from_indices(
-    dataset: CompiledMazeDataset,
-    bundle: CompiledMazeBundle,
-    indices: Sequence[int],
-    *,
-    device=None,
-) -> SymbolicBatch:
-    sequence_lengths = np.asarray(dataset.sequence_lengths[indices], dtype=np.int64)
-    prompt_lengths = np.asarray(dataset.prompt_lengths[indices], dtype=np.int64)
-    max_sequence_length = int(sequence_lengths.max())
-    full = np.asarray(
-        dataset.tokens[indices, :max_sequence_length],
-        dtype=np.int64,
-    )
-    inputs = full[:, :-1].copy()
-    targets = full[:, 1:].copy()
-    positions = np.arange(targets.shape[1])[None, :]
-    inputs[positions >= (sequence_lengths - 1)[:, None]] = bundle.stoi[PAD_TOKEN]
-    targets[positions < (prompt_lengths - 1)[:, None]] = -1
-    targets[positions >= (sequence_lengths - 1)[:, None]] = -1
-    output_lengths = sequence_lengths - prompt_lengths
-    return SymbolicBatch(
-        idx=torch.as_tensor(inputs, dtype=torch.long, device=device),
-        targets=torch.as_tensor(targets, dtype=torch.long, device=device),
-        prompt_lengths=torch.as_tensor(prompt_lengths, dtype=torch.long, device=device),
-        output_lengths=torch.as_tensor(output_lengths, dtype=torch.long, device=device),
+    indices = training_indices(len(dataset), batch_size, rng)
+    return batch_from_compiled_indices(
+        dataset,
+        indices,
+        pad_id=bundle.stoi[PAD_TOKEN],
+        device=device,
     )
 
 
@@ -398,27 +375,20 @@ def build_maze_eval_batches(
         route_policy=route_policy,
     )
     canonical_split = "validation" if split == "val" else split
-    count = batch_size * num_batches
-    if count > len(dataset):
-        raise ValueError(
-            f"requested {count} {canonical_split} examples without replacement, "
-            f"but the dataset contains only {len(dataset)}"
-        )
-    selection_seed = int.from_bytes(
-        hashlib.sha256(
-            f"{bundle.dataset_id}|{canonical_split}|selection-v1".encode("ascii")
-        ).digest()[:8],
-        "little",
+    indices = deterministic_eval_indices(
+        dataset_id=bundle.dataset_id,
+        split=canonical_split,
+        dataset_size=len(dataset),
+        count=batch_size * num_batches,
     )
-    indices = random.Random(selection_seed).sample(range(len(dataset)), count)
     return [
-        _batch_from_indices(
+        batch_from_compiled_indices(
             dataset,
-            bundle,
-            indices[offset : offset + batch_size],
+            batch_indices,
+            pad_id=bundle.stoi[PAD_TOKEN],
             device=device,
         )
-        for offset in range(0, count, batch_size)
+        for batch_indices in chunk_indices(indices, batch_size)
     ]
 
 

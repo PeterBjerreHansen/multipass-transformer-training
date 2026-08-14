@@ -22,9 +22,12 @@ class TraceTask:
     build_vocab_fn: Callable
     required_block_size_fn: Callable
     build_batch_fn: Callable
+    build_eval_batches_fn: Callable
     generation_metrics_fn: Callable
     format_metrics_fn: Callable
-    build_eval_batches_fn: Callable | None = None
+    evaluation_metadata_fn: Callable
+    validation_split: str
+    evaluation_split: str
 
     def build_vocab(self, args):
         return self.build_vocab_fn(args)
@@ -42,12 +45,30 @@ class TraceTask:
         return self.format_metrics_fn(metrics)
 
     def build_eval_batches(self, args, stoi, *, split: str):
-        if self.build_eval_batches_fn is None:
-            return None
         return self.build_eval_batches_fn(args, stoi, split)
+
+    def evaluation_metadata(self, args, *, split: str) -> dict[str, object]:
+        return dict(self.evaluation_metadata_fn(args, split))
+
+
+def _bind_othello_dataset(args) -> str:
+    current_id = othello.dataset_id(
+        othello_train_games=args.othello_train_games,
+        othello_val_games=args.othello_val_games,
+        othello_dataset_seed=args.othello_dataset_seed,
+    )
+    saved_id = getattr(args, "othello_dataset_id", None)
+    if saved_id is not None and saved_id != current_id:
+        raise ValueError(
+            "Othello dataset ID mismatch: saved run uses "
+            f"{saved_id}, but the selected dataset is {current_id}"
+        )
+    args.othello_dataset_id = current_id
+    return current_id
 
 
 def _othello_vocab(args):
+    _bind_othello_dataset(args)
     return othello.build_othello_vocab(
         othello_train_games=args.othello_train_games,
         othello_val_games=args.othello_val_games,
@@ -55,6 +76,7 @@ def _othello_vocab(args):
 
 
 def _othello_block_size(args) -> int:
+    _bind_othello_dataset(args)
     return othello.required_block_size(
         othello_train_games=args.othello_train_games,
         othello_val_games=args.othello_val_games,
@@ -62,12 +84,28 @@ def _othello_block_size(args) -> int:
 
 
 def _othello_batch(args, stoi, rng: random.Random, split: str):
+    _bind_othello_dataset(args)
     return othello.build_othello_batch(
         batch_size=args.batch_size,
         stoi=stoi,
         device=args.device,
         rng=rng,
         split=split,
+        othello_data_dir=args.othello_data_dir,
+        othello_train_games=args.othello_train_games,
+        othello_val_games=args.othello_val_games,
+        othello_dataset_seed=args.othello_dataset_seed,
+    )
+
+
+def _othello_eval_batches(args, stoi, split: str):
+    _bind_othello_dataset(args)
+    return othello.build_othello_eval_batches(
+        batch_size=args.batch_size,
+        num_batches=args.eval_batches,
+        stoi=stoi,
+        split=split,
+        device=args.device,
         othello_data_dir=args.othello_data_dir,
         othello_train_games=args.othello_train_games,
         othello_val_games=args.othello_val_games,
@@ -82,6 +120,14 @@ def _othello_metrics(model, batch, args, inference_mode: str | None):
         args,
         inference_mode=inference_mode,
     )
+
+
+def _othello_metadata(args, split: str) -> dict[str, object]:
+    dataset_id = _bind_othello_dataset(args)
+    return {
+        "dataset_split": "validation" if split == "val" else split,
+        "othello_dataset_id": dataset_id,
+    }
 
 
 def _bind_shortest_path_dataset(args):
@@ -152,6 +198,14 @@ def _shortest_path_metrics(model, batch, args, inference_mode: str | None):
     )
 
 
+def _shortest_path_metadata(args, split: str) -> dict[str, object]:
+    bundle = _bind_shortest_path_dataset(args)
+    return {
+        "dataset_split": "validation" if split == "val" else split,
+        "shortest_path_dataset_id": bundle.dataset_id,
+    }
+
+
 def _maze_vocab(args):
     bundle = _bind_maze_dataset(args)
     return list(bundle.vocab), dict(bundle.stoi), dict(bundle.itos)
@@ -219,32 +273,50 @@ def _maze_metrics(model, batch, args, inference_mode: str | None):
     )
 
 
+def _maze_metadata(args, split: str) -> dict[str, object]:
+    bundle = _bind_maze_dataset(args)
+    return {
+        "dataset_split": "validation" if split == "val" else split,
+        "maze_dataset_id": bundle.dataset_id,
+    }
+
+
 TRACE_TASKS: dict[str, TraceTask] = {
     "maze": TraceTask(
         name="maze",
         build_vocab_fn=_maze_vocab,
         required_block_size_fn=_maze_block_size,
         build_batch_fn=_maze_batch,
+        build_eval_batches_fn=_maze_eval_batches,
         generation_metrics_fn=_maze_metrics,
         format_metrics_fn=maze_eval.format_metrics,
-        build_eval_batches_fn=_maze_eval_batches,
+        evaluation_metadata_fn=_maze_metadata,
+        validation_split="validation",
+        evaluation_split="test",
     ),
     "othello": TraceTask(
         name="othello",
         build_vocab_fn=_othello_vocab,
         required_block_size_fn=_othello_block_size,
         build_batch_fn=_othello_batch,
+        build_eval_batches_fn=_othello_eval_batches,
         generation_metrics_fn=_othello_metrics,
         format_metrics_fn=othello_eval.format_metrics,
+        evaluation_metadata_fn=_othello_metadata,
+        validation_split="val",
+        evaluation_split="val",
     ),
     "shortest_path": TraceTask(
         name="shortest_path",
         build_vocab_fn=_shortest_path_vocab,
         required_block_size_fn=_shortest_path_block_size,
         build_batch_fn=_shortest_path_batch,
+        build_eval_batches_fn=_shortest_path_eval_batches,
         generation_metrics_fn=_shortest_path_metrics,
         format_metrics_fn=shortest_path_eval.format_metrics,
-        build_eval_batches_fn=_shortest_path_eval_batches,
+        evaluation_metadata_fn=_shortest_path_metadata,
+        validation_split="validation",
+        evaluation_split="test",
     ),
 }
 

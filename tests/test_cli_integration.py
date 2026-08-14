@@ -176,6 +176,8 @@ def test_othello_random_prefix_evaluation_cli(tmp_path):
     summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["checkpoint"] == "best"
     assert summary["checkpoint_path"] == str(run_dir / "best.pt")
+    assert summary["dataset_split"] == "validation"
+    assert len(summary["othello_dataset_id"]) == 64
     assert summary["evaluated_inference_modes"] == ["recompute", "append_recurrent"]
     for mode in summary["evaluated_inference_modes"]:
         overall = summary["modes"][mode]["overall"]

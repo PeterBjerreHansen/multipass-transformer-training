@@ -160,7 +160,13 @@ def sample_validation_traces(
         othello_val_games=args.othello_val_games,
         othello_dataset_seed=args.othello_dataset_seed,
     )
-    return [dataset.sample_trace(rng) for _ in range(count)]
+    if count > len(dataset):
+        raise ValueError(
+            f"requested {count} validation games without replacement, "
+            f"but the dataset contains only {len(dataset)}"
+        )
+    indices = rng.sample(range(len(dataset)), count)
+    return [dataset.trace_at(index) for index in indices]
 
 
 def serialized_prompt(

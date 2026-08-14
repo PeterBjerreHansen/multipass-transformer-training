@@ -30,6 +30,7 @@ from experiments.train_trace import (
 from model_factory import is_multi_pass_architecture
 from tasks.common import EOS_TOKEN
 from tasks.trace import othello, othello_eval
+from tasks.trace.registry import get_trace_task
 
 
 INFERENCE_MODES = ("recompute", "append_recurrent")
@@ -303,6 +304,10 @@ def evaluate_othello_prefix(cli_args) -> Path:
         "evaluated_inference_modes": evaluated_modes,
         "modes": mode_summaries,
     }
+    task = get_trace_task(args.task)
+    payload.update(
+        task.evaluation_metadata(args, split=task.evaluation_split)
+    )
     summary_path = output_dir / "summary.json"
     write_json(summary_path, payload)
     print(f"wrote {summary_path}")

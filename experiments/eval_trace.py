@@ -28,6 +28,7 @@ from experiments.train_trace import (
     trace_generation_metrics,
     validate_task_args,
 )
+from tasks.trace.registry import get_trace_task
 
 
 def parse_args(argv: list[str] | None = None):
@@ -97,7 +98,8 @@ def evaluate_run(cli_args) -> Path:
     checkpoint = load_checkpoint_payload(checkpoint_path, device="cpu")
     block_size, vocab, stoi, _itos, model, _optimizer = build_training_objects(args)
     restore_checkpoint_state(checkpoint, model=model, optimizer=None, device=args.device)
-    evaluated_split = "test" if args.task in {"shortest_path", "maze"} else "val"
+    task = get_trace_task(args.task)
+    evaluated_split = task.evaluation_split
     batches = build_fixed_eval_batches(args, stoi, split=evaluated_split)
 
     set_seed(cli_args.seed)
@@ -132,12 +134,7 @@ def evaluate_run(cli_args) -> Path:
         "evaluation_examples": sum(int(batch.idx.shape[0]) for batch in batches),
         "metrics": metrics,
     }
-    if args.task in {"maze", "shortest_path"}:
-        summary["dataset_split"] = evaluated_split
-    if args.task == "shortest_path":
-        summary["shortest_path_dataset_id"] = args.shortest_path_dataset_id
-    elif args.task == "maze":
-        summary["maze_dataset_id"] = args.maze_dataset_id
+    summary.update(task.evaluation_metadata(args, split=evaluated_split))
     write_json(summary_path, summary)
 
     print(

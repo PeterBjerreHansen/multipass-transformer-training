@@ -8,14 +8,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 import random
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
-import torch
 
 from tasks.common import (
     BOS_TOKEN,
@@ -24,6 +22,12 @@ from tasks.common import (
     SEP_TOKEN,
     SymbolicBatch,
     build_vocab,
+)
+from tasks.trace.compiled import (
+    batch_from_compiled_indices,
+    chunk_indices,
+    deterministic_eval_indices,
+    training_indices,
 )
 
 
@@ -666,41 +670,6 @@ def required_block_size(
     return int(load_shortest_path_bundle(shortest_path_data_dir).manifest["block_size"])
 
 
-def _batch_from_indices(
-    dataset: CompiledShortestPathDataset,
-    bundle: CompiledShortestPathBundle,
-    indices: Sequence[int],
-    *,
-    device=None,
-) -> SymbolicBatch:
-    if not indices:
-        raise ValueError("shortest-path batch indices must not be empty")
-    selected = list(indices)
-    sequence_lengths = np.asarray(dataset.sequence_lengths[selected], dtype=np.int64)
-    prompt_lengths = np.asarray(dataset.prompt_lengths[selected], dtype=np.int64)
-    max_sequence_length = int(sequence_lengths.max())
-    full = np.asarray(
-        dataset.tokens[selected, :max_sequence_length],
-        dtype=np.int64,
-    )
-    inputs = full[:, :-1].copy()
-    targets = full[:, 1:].copy()
-    positions = np.arange(targets.shape[1])[None, :]
-    inputs[positions >= (sequence_lengths - 1)[:, None]] = bundle.stoi[PAD_TOKEN]
-    targets[positions < (prompt_lengths - 1)[:, None]] = -1
-    targets[positions >= (sequence_lengths - 1)[:, None]] = -1
-    return SymbolicBatch(
-        idx=torch.as_tensor(inputs, dtype=torch.long, device=device),
-        targets=torch.as_tensor(targets, dtype=torch.long, device=device),
-        prompt_lengths=torch.as_tensor(prompt_lengths, dtype=torch.long, device=device),
-        output_lengths=torch.as_tensor(
-            sequence_lengths - prompt_lengths,
-            dtype=torch.long,
-            device=device,
-        ),
-    )
-
-
 def build_shortest_path_batch(
     batch_size: int,
     shortest_path_data_dir: str | Path,
@@ -717,8 +686,13 @@ def build_shortest_path_batch(
         shortest_path_data_dir=shortest_path_data_dir,
     )
     bundle = load_shortest_path_bundle(shortest_path_data_dir)
-    indices = [rng.randrange(len(dataset)) for _ in range(batch_size)]
-    return _batch_from_indices(dataset, bundle, indices, device=device)
+    indices = training_indices(len(dataset), batch_size, rng)
+    return batch_from_compiled_indices(
+        dataset,
+        indices,
+        pad_id=bundle.stoi[PAD_TOKEN],
+        device=device,
+    )
 
 
 def build_shortest_path_eval_batches(
@@ -737,27 +711,20 @@ def build_shortest_path_eval_batches(
         shortest_path_data_dir=shortest_path_data_dir,
     )
     bundle = load_shortest_path_bundle(shortest_path_data_dir)
-    count = batch_size * num_batches
-    if count > len(dataset):
-        raise ValueError(
-            f"requested {count} {canonical_split} examples without replacement, "
-            f"but the dataset contains only {len(dataset)}"
-        )
-    selection_seed = int.from_bytes(
-        hashlib.sha256(
-            f"{bundle.dataset_id}|{canonical_split}|selection-v1".encode("ascii")
-        ).digest()[:8],
-        "little",
+    indices = deterministic_eval_indices(
+        dataset_id=bundle.dataset_id,
+        split=canonical_split,
+        dataset_size=len(dataset),
+        count=batch_size * num_batches,
     )
-    indices = random.Random(selection_seed).sample(range(len(dataset)), count)
     return [
-        _batch_from_indices(
+        batch_from_compiled_indices(
             dataset,
-            bundle,
-            indices[offset : offset + batch_size],
+            batch_indices,
+            pad_id=bundle.stoi[PAD_TOKEN],
             device=device,
         )
-        for offset in range(0, count, batch_size)
+        for batch_indices in chunk_indices(indices, batch_size)
     ]
 
 

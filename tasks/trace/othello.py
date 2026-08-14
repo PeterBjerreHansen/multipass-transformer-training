@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,13 @@ from tasks.common import (
     build_vocab,
     make_sequence,
 )
+from tasks.trace.compiled import (
+    chunk_indices,
+    deterministic_eval_indices,
+    training_indices,
+)
+
+
 BOARD_SIZE = 8
 NUM_SQUARES = BOARD_SIZE * BOARD_SIZE
 MAX_MOVES = 60
@@ -229,6 +237,25 @@ def _metadata_payload(train_games: int, val_games: int, seed: int) -> dict[str, 
     }
 
 
+def dataset_id(
+    *,
+    othello_train_games: int,
+    othello_val_games: int,
+    othello_dataset_seed: int,
+) -> str:
+    """Identify the deterministic finite dataset selected by the task args."""
+    payload = json.dumps(
+        _metadata_payload(
+            othello_train_games,
+            othello_val_games,
+            othello_dataset_seed,
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def ensure_othello_datasets(
     *,
     othello_data_dir: str,
@@ -282,7 +309,10 @@ class OthelloTraceDataset:
         return int(self.traces.shape[0])
 
     def sample_trace(self, rng: random.Random) -> list[int]:
-        row = rng.randrange(len(self))
+        row = training_indices(len(self), 1, rng)[0]
+        return self.trace_at(row)
+
+    def trace_at(self, row: int) -> list[int]:
         length = int(self.lengths[row])
         return [int(value) for value in self.traces[row, :length]]
 
@@ -362,19 +392,70 @@ def build_othello_batch(
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     rng = rng or random.Random()
+    dataset = load_othello_dataset(
+        split=split,
+        othello_data_dir=othello_data_dir,
+        othello_train_games=othello_train_games,
+        othello_val_games=othello_val_games,
+        othello_dataset_seed=othello_dataset_seed,
+    )
+    indices = training_indices(len(dataset), batch_size, rng)
+    return _othello_batch_from_indices(dataset, indices, stoi=stoi, device=device)
+
+
+def _othello_batch_from_indices(
+    dataset: OthelloTraceDataset,
+    indices: Sequence[int],
+    *,
+    stoi: Dict[str, int],
+    device=None,
+) -> SymbolicBatch:
     rows = []
-    for _ in range(batch_size):
-        prompt, answer, _trace = sample_othello_example(
-            stoi,
-            rng,
-            split=split,
-            othello_data_dir=othello_data_dir,
+    for index in indices:
+        trace = dataset.trace_at(int(index))
+        answer = [stoi[move_token(square)] for square in trace]
+        rows.append(make_sequence([], answer, stoi))
+    return build_batch_from_sequences(rows, pad_id=stoi[PAD_TOKEN], device=device)
+
+
+def build_othello_eval_batches(
+    *,
+    batch_size: int,
+    num_batches: int,
+    stoi: Dict[str, int],
+    split: str,
+    othello_data_dir: str,
+    othello_train_games: int,
+    othello_val_games: int,
+    othello_dataset_seed: int,
+    device=None,
+) -> list[SymbolicBatch]:
+    dataset = load_othello_dataset(
+        split=split,
+        othello_data_dir=othello_data_dir,
+        othello_train_games=othello_train_games,
+        othello_val_games=othello_val_games,
+        othello_dataset_seed=othello_dataset_seed,
+    )
+    indices = deterministic_eval_indices(
+        dataset_id=dataset_id(
             othello_train_games=othello_train_games,
             othello_val_games=othello_val_games,
             othello_dataset_seed=othello_dataset_seed,
+        ),
+        split=split,
+        dataset_size=len(dataset),
+        count=batch_size * num_batches,
+    )
+    return [
+        _othello_batch_from_indices(
+            dataset,
+            batch_indices,
+            stoi=stoi,
+            device=device,
         )
-        rows.append(make_sequence(prompt, answer, stoi))
-    return build_batch_from_sequences(rows, pad_id=stoi[PAD_TOKEN], device=device)
+        for batch_indices in chunk_indices(indices, batch_size)
+    ]
 
 
 def legal_move_token_ids_after_prefix(
@@ -450,7 +531,9 @@ __all__ = [
     "DEFAULT_VAL_GAMES",
     "MAX_MOVES",
     "build_othello_batch",
+    "build_othello_eval_batches",
     "build_othello_vocab",
+    "dataset_id",
     "ensure_othello_datasets",
     "legal_move_token_ids_after_prefix",
     "legal_prefix_length",
