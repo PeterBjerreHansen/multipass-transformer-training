@@ -45,6 +45,8 @@ def parse_args(argv: list[str] | None = None):
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--eval-batches", type=int, default=None)
+    parser.add_argument("--shortest-path-data-dir", default=None)
+    parser.add_argument("--maze-data-dir", default=None)
     parser.add_argument("--token-selection", choices=["sample", "argmax"], default="argmax")
     parser.add_argument("--inference-mode", choices=["recompute", "append_recurrent"], required=True)
     parser.add_argument("--seed", type=int, default=1337)
@@ -58,6 +60,10 @@ def _load_eval_args(cli_args) -> tuple[SimpleNamespace, Path]:
         saved["device"] = cli_args.device
     if cli_args.eval_batches is not None:
         saved["eval_batches"] = cli_args.eval_batches
+    for name in ("shortest_path_data_dir", "maze_data_dir"):
+        value = getattr(cli_args, name)
+        if value is not None:
+            saved[name] = value
     saved["token_selection"] = cli_args.token_selection
     saved["inference_mode"] = cli_args.inference_mode
     saved["seed"] = cli_args.seed
@@ -91,7 +97,7 @@ def evaluate_run(cli_args) -> Path:
     checkpoint = load_checkpoint_payload(checkpoint_path, device="cpu")
     block_size, vocab, stoi, _itos, model, _optimizer = build_training_objects(args)
     restore_checkpoint_state(checkpoint, model=model, optimizer=None, device=args.device)
-    evaluated_split = "test" if args.task == "shortest_path" else "val"
+    evaluated_split = "test" if args.task in {"shortest_path", "maze"} else "val"
     batches = build_fixed_eval_batches(args, stoi, split=evaluated_split)
 
     set_seed(cli_args.seed)
@@ -126,9 +132,12 @@ def evaluate_run(cli_args) -> Path:
         "evaluation_examples": sum(int(batch.idx.shape[0]) for batch in batches),
         "metrics": metrics,
     }
-    if args.task == "shortest_path":
+    if args.task in {"maze", "shortest_path"}:
         summary["dataset_split"] = evaluated_split
+    if args.task == "shortest_path":
         summary["shortest_path_dataset_id"] = args.shortest_path_dataset_id
+    elif args.task == "maze":
+        summary["maze_dataset_id"] = args.maze_dataset_id
     write_json(summary_path, summary)
 
     print(

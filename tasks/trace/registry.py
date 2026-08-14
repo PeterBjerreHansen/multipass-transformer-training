@@ -153,33 +153,60 @@ def _shortest_path_metrics(model, batch, args, inference_mode: str | None):
 
 
 def _maze_vocab(args):
-    return maze.build_maze_vocab(
-        args.maze_data_dir,
-        args.maze_input_representation,
-        args.maze_target_representation,
-        args.maze_route_policy,
-    )
+    bundle = _bind_maze_dataset(args)
+    return list(bundle.vocab), dict(bundle.stoi), dict(bundle.itos)
 
 
-def _maze_block_size(args) -> int:
-    return maze.required_block_size(
-        args.maze_data_dir,
-        args.maze_input_representation,
-        args.maze_target_representation,
-        args.maze_route_policy,
-    )
-
-
-def _maze_batch(args, stoi, rng: random.Random, _split: str):
-    return maze.build_maze_batch(
-        batch_size=args.batch_size,
-        maze_data_dir=args.maze_data_dir,
+def _bind_maze_dataset(args):
+    data_dir = getattr(args, "maze_data_dir", None)
+    if not data_dir:
+        raise ValueError("maze requires --maze-data-dir")
+    bundle = maze.load_maze_bundle(
+        maze_data_dir=data_dir,
         input_representation=args.maze_input_representation,
         target_representation=args.maze_target_representation,
         route_policy=args.maze_route_policy,
-        split=_split,
+    )
+    saved_id = getattr(args, "maze_dataset_id", None)
+    if saved_id is not None and saved_id != bundle.dataset_id:
+        raise ValueError(
+            "maze dataset ID mismatch: saved run uses "
+            f"{saved_id}, but {bundle.directory} contains {bundle.dataset_id}"
+        )
+    args.maze_data_dir = str(bundle.directory)
+    args.maze_dataset_id = bundle.dataset_id
+    return bundle
+
+
+def _maze_block_size(args) -> int:
+    return int(_bind_maze_dataset(args).manifest["block_size"])
+
+
+def _maze_batch(args, _stoi, rng: random.Random, split: str):
+    bundle = _bind_maze_dataset(args)
+    return maze.build_maze_batch(
+        batch_size=args.batch_size,
+        maze_data_dir=bundle.directory,
+        input_representation=args.maze_input_representation,
+        target_representation=args.maze_target_representation,
+        route_policy=args.maze_route_policy,
+        split=split,
         device=args.device,
         rng=rng,
+    )
+
+
+def _maze_eval_batches(args, _stoi, split: str):
+    bundle = _bind_maze_dataset(args)
+    return maze.build_maze_eval_batches(
+        batch_size=args.batch_size,
+        num_batches=args.eval_batches,
+        maze_data_dir=bundle.directory,
+        input_representation=args.maze_input_representation,
+        target_representation=args.maze_target_representation,
+        route_policy=args.maze_route_policy,
+        split=split,
+        device=args.device,
     )
 
 
@@ -200,6 +227,7 @@ TRACE_TASKS: dict[str, TraceTask] = {
         build_batch_fn=_maze_batch,
         generation_metrics_fn=_maze_metrics,
         format_metrics_fn=maze_eval.format_metrics,
+        build_eval_batches_fn=_maze_eval_batches,
     ),
     "othello": TraceTask(
         name="othello",

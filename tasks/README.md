@@ -87,6 +87,11 @@ maze-data compile-all \
 
 The task supports sparse-cell and dense-grid prompts. It supports cell-path and
 action targets. Route policies are `astar`, `uniform_shortest`, and `dfs`.
+Training samples with replacement. Checkpoint selection and diagnostics use a
+deterministic validation subset without replacement; post-training
+`eval_trace` uses the held-out test split. Runs record a dataset ID derived from
+the compiled manifest and refuse to resume or evaluate against a different
+artifact.
 
 Maze evaluation reports:
 

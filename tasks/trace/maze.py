@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -72,10 +73,20 @@ class CompiledMazeBundle:
     vocab: tuple[str, ...]
     stoi: Dict[str, int]
     itos: Dict[int, str]
+    dataset_id: str
 
 
 _BUNDLE_CACHE: dict[tuple[str, str, str, str], CompiledMazeBundle] = {}
 _DATASET_CACHE: dict[tuple[str, str, str, str, str], CompiledMazeDataset] = {}
+
+
+def _dataset_id(manifest: dict) -> str:
+    payload = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _artifact_name(
@@ -151,6 +162,13 @@ def load_maze_bundle(
                 f"maze dataset manifest {field} is {manifest.get(field)!r}; "
                 f"expected {value!r}"
             )
+    source_sha256 = manifest.get("source_sha256")
+    if not (
+        isinstance(source_sha256, str)
+        and len(source_sha256) == 64
+        and all(character in "0123456789abcdef" for character in source_sha256)
+    ):
+        raise ValueError("compiled maze manifest has an invalid source_sha256")
     vocab_path = directory / str(manifest.get("vocab", "vocab.json"))
     vocab_payload = json.loads(vocab_path.read_text(encoding="utf-8"))
     vocab = tuple(str(token) for token in vocab_payload["tokens"])
@@ -177,7 +195,14 @@ def load_maze_bundle(
         raise ValueError("compiled maze block size is inconsistent")
     if manifest.get("token_dtype") != "uint16":
         raise ValueError("compiled maze token dtype must be uint16")
-    bundle = CompiledMazeBundle(directory, manifest, vocab, stoi, itos)
+    bundle = CompiledMazeBundle(
+        directory,
+        manifest,
+        vocab,
+        stoi,
+        itos,
+        _dataset_id(manifest),
+    )
     _BUNDLE_CACHE[key] = bundle
     return bundle
 
@@ -314,6 +339,16 @@ def build_maze_batch(
         route_policy=route_policy,
     )
     indices = dataset.sample_indices(batch_size, rng)
+    return _batch_from_indices(dataset, bundle, indices, device=device)
+
+
+def _batch_from_indices(
+    dataset: CompiledMazeDataset,
+    bundle: CompiledMazeBundle,
+    indices: Sequence[int],
+    *,
+    device=None,
+) -> SymbolicBatch:
     sequence_lengths = np.asarray(dataset.sequence_lengths[indices], dtype=np.int64)
     prompt_lengths = np.asarray(dataset.prompt_lengths[indices], dtype=np.int64)
     max_sequence_length = int(sequence_lengths.max())
@@ -334,6 +369,57 @@ def build_maze_batch(
         prompt_lengths=torch.as_tensor(prompt_lengths, dtype=torch.long, device=device),
         output_lengths=torch.as_tensor(output_lengths, dtype=torch.long, device=device),
     )
+
+
+def build_maze_eval_batches(
+    *,
+    batch_size: int,
+    num_batches: int,
+    maze_data_dir: str | Path,
+    input_representation: str,
+    target_representation: str,
+    route_policy: str,
+    split: str,
+    device=None,
+) -> list[SymbolicBatch]:
+    if batch_size < 1 or num_batches < 1:
+        raise ValueError("batch_size and num_batches must be positive")
+    dataset = load_maze_dataset(
+        split=split,
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
+    )
+    bundle = load_maze_bundle(
+        maze_data_dir=maze_data_dir,
+        input_representation=input_representation,
+        target_representation=target_representation,
+        route_policy=route_policy,
+    )
+    canonical_split = "validation" if split == "val" else split
+    count = batch_size * num_batches
+    if count > len(dataset):
+        raise ValueError(
+            f"requested {count} {canonical_split} examples without replacement, "
+            f"but the dataset contains only {len(dataset)}"
+        )
+    selection_seed = int.from_bytes(
+        hashlib.sha256(
+            f"{bundle.dataset_id}|{canonical_split}|selection-v1".encode("ascii")
+        ).digest()[:8],
+        "little",
+    )
+    indices = random.Random(selection_seed).sample(range(len(dataset)), count)
+    return [
+        _batch_from_indices(
+            dataset,
+            bundle,
+            indices[offset : offset + batch_size],
+            device=device,
+        )
+        for offset in range(0, count, batch_size)
+    ]
 
 
 def cell_to_coordinate(cell: int, *, width: int, height: int) -> tuple[int, int]:
@@ -500,6 +586,7 @@ __all__ = [
     "ROUTE_POLICIES",
     "TARGET_REPRESENTATIONS",
     "build_maze_batch",
+    "build_maze_eval_batches",
     "build_maze_vocab",
     "decode_maze_target",
     "load_maze_bundle",

@@ -4,7 +4,6 @@ from models import (
     CausalTransformer,
     LatentFeedbackTransformer,
     MemoryAddTransformer,
-    MemoryTapeConfig,
     MemoryTapeTransformer,
     MultiPassConfig,
     TransformerConfig,
@@ -36,7 +35,7 @@ def build_model(args, vocab_size: int, block_size: int, device: str):
         model = CausalTransformer(TransformerConfig(**common))
     elif args.architecture == "memory_tape":
         model = MemoryTapeTransformer(
-            MemoryTapeConfig(
+            MultiPassConfig(
                 **common,
                 max_passes=args.max_passes,
             )

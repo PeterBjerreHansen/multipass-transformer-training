@@ -101,11 +101,6 @@ class MultiPassConfig(TransformerConfig):
             )
 
 
-@dataclass
-class MemoryTapeConfig(MultiPassConfig):
-    """Configuration seam for MemoryTape-specific ablations."""
-
-
 # -----------------------------------------------------------------------------
 # Shared components
 # -----------------------------------------------------------------------------
@@ -474,15 +469,11 @@ class MultiPassTransformer(nn.Module):
 
     def calc_total_loss(
         self,
-        output_or_logits: MultiPassOutput | Sequence[torch.Tensor],
+        output: MultiPassOutput,
         targets: torch.Tensor,
         loss_weights: Sequence[float] | None = None,
     ) -> LossOutput:
-        if isinstance(output_or_logits, MultiPassOutput):
-            logits_per_pass = output_or_logits.logits_per_pass
-        else:
-            logits_per_pass = tuple(output_or_logits)
-        losses = tuple(self.calc_loss(logits, targets) for logits in logits_per_pass)
+        losses = tuple(self.calc_loss(logits, targets) for logits in output.logits_per_pass)
         weights = normalize_pass_weights(
             loss_weights,
             len(losses),
@@ -667,7 +658,7 @@ class LatentFeedbackTransformer(MultiPassTransformer):
 
 
 class MemoryBlock(nn.Module):
-    def __init__(self, config: MemoryTapeConfig):
+    def __init__(self, config: MultiPassConfig):
         super().__init__()
         self.ln_self = LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
@@ -688,14 +679,11 @@ class MemoryBlock(nn.Module):
 class MemoryTapeTransformer(MultiPassTransformer):
     block_cls = MemoryBlock
 
-    def __init__(self, config: MemoryTapeConfig):
+    def __init__(self, config: MultiPassConfig):
         super().__init__(config)
         self.ln_mem = LayerNorm(config.n_embd)
         self.mem_head = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.finish_initialization()
-        with torch.no_grad():
-            for block in self.transformer.h:
-                block.cross_attn.c_proj.weight.mul_(1.0)
 
     def forward_pass(
         self,

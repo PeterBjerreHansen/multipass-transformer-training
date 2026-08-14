@@ -6,8 +6,8 @@ This project explores a way to train transformers for recurrent-style inference 
 > [*Full-bandwidth transformer*](https://arxiv.org/abs/2608.08888). The paper
 > independently develops the central multi-pass latent-feedback idea explored
 > here and validates it at much larger scale. It has stronger benchmarks and a
-> fuller analysis. If this repository interests you, read their paper. I am 
-> glad to see the idea work in the big leagues. This repository remainsa small 
+> fuller analysis. If this repository interests you, read their paper. I am
+> glad to see the idea work in the big leagues. This repository remains a small
 > testbed for explicit memory-tape variants and controlled state-tracking
 > experiments.
 
@@ -128,7 +128,7 @@ The plot above comes from an earlier architecture sweep. Some plotted variants a
 
 `main` supports three multi-pass designs. All use the shared training and inference methods implemented by `MultiPassTransformer`.
 
-The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full tape written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared wrapper performs the shift, final normalization, language-model head, and memory write. Each model defines only the decoder mapping $(X,R)$ to its pre-final hidden stream.
+The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full tape written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared wrapper controls recurrence and shifts the previous tape. Each model owns one complete pass, including its final normalization, language-model head, and memory write.
 
 ### Memory Through Attention: The MemoryTape Architecture
 
@@ -142,7 +142,7 @@ MemoryTape retains an ordinary causal token decoder. Its decoder is:
 > &nbsp;&nbsp; $`H = H + \mathrm{CausalCrossAttention}\left(Q=\mathrm{LN}_{q}(H),\ KV=\mathrm{LN}_{kv}(R)\right)`$<br>
 > &nbsp;&nbsp; $`H = H + \mathrm{MLP}(\mathrm{LN}_{\mathrm{mlp}}(H))`$<br>
 
-Causal cross-attention is applied over $R$ as a separately addressable key/value source; the tape is not concatenated with the token stream. Its inclusive causal mask permits query position $t$ to read tape slots $s\leq t$. Because $R_s=M_{s-1}$, this is strict causality with respect to the unshifted tape: only memories from original positions before $t$ are readable. The reader is an ordinary residual branch with no learned gate. Its output projection is initialized at half the standard residual scale, preserving the former initial memory-read amplitude without introducing a scale-nonidentifiable scalar parameter. On pass one, $R=0$, so the cross-attention contribution is exactly zero and the model begins as a causal token decoder.
+Causal cross-attention is applied over $R$ as a separately addressable key/value source; the tape is not concatenated with the token stream. Its inclusive causal mask permits query position $t$ to read tape slots $s\leq t$. Because $R_s=M_{s-1}$, this is strict causality with respect to the unshifted tape: only memories from original positions before $t$ are readable. The reader is an ordinary residual branch with no learned gate. On pass one, $R=0$, so the cross-attention contribution is exactly zero and the model begins as a causal token decoder.
 
 ### Residual Memory Fusion: The MemoryAdd Architecture
 
@@ -156,19 +156,28 @@ MemoryAdd keeps the ordinary token stream intact and learns a residual correctio
 
 ### GLU Latent Feedback
 
-LatentFeedback follows the feedback transition proposed by Wang et al. The
-first pass is an ordinary transformer pass. Later passes use the previous
-top-layer hidden states as the memory tape and combine them with token
-embeddings through a gated linear unit before reusing the same decoder stack:
+LatentFeedback implements the asymmetric GLU transition from
+[Wang et al., *Full-bandwidth transformer*, Section 3.1](https://arxiv.org/html/2608.08888#S3.SS1).
+The previous top-layer state supplies the value path. The token embedding
+controls the sigmoid gate. During parallel training, the shifted tape $R$
+supplies the previous state.
 
-```math
-H_{\mathrm{input}}^{(k)}
-= W_U\mathrm{Shift}(H^{(k-1)})
-  \odot \sigma(W_G\mathrm{LN}(X))
-```
+> **LatentFeedback decoder**
+>
+> $`\textbf{if } k=1: \quad H=X`$<br>
+> $`\textbf{otherwise:}`$<br>
+> &nbsp;&nbsp; $`H=\mathrm{LN}_{\mathrm{fb}}\left(W_U R\odot\sigma\left(W_G\mathrm{LN}_{\mathrm{fb}}(X)\right)\right)`$<br>
+> &nbsp;&nbsp; $`H_0=X_0`$<br>
+> $`\textbf{for each causal decoder block:}`$<br>
+> &nbsp;&nbsp; $`H=\mathrm{DecoderBlock}(H)`$<br>
+> $`H=\mathrm{LN}_{f}(H)`$<br>
+> $`M^{(k)}=H`$
 
-It shares the repository's relative pass-loss controls and append-recurrent
-inference contract rather than reproducing the paper's complete training setup.
+Position zero has no earlier memory, so it retains its token embedding. The
+decoder writes its final top-layer state to the next memory tape. This
+implementation uses the repository's LayerNorm, pass-loss controls, and
+append-recurrent inference contract. It does not reproduce the paper's full
+model or training setup.
 
 ## Tasks
 
@@ -182,7 +191,10 @@ Task generators and task-specific metrics live under `tasks/`. See [tasks/README
 ## Running experiments
 
 `main` supports `transformer`, `memory_tape`, `memory_add`, and
-`latent_feedback`. The canonical launchers run all four by default:
+`latent_feedback`. The canonical launchers run all four with the same shared
+pass count, loss weighting, and training procedure. This is a controlled
+architecture comparison, not a reproduction of LatentFeedback's paper-specific
+training protocol. The separate scheduled example below tests that protocol.
 
 ```bash
 bash scripts/bbh/run.sh
@@ -278,13 +290,15 @@ python3 -m experiments.train_bbh \
   --preset permutation_main \
   --architecture latent_feedback \
   --max-passes 3 \
-  --pass-loss-weights 1 1 \
+  --pass-loss-weights 2 1 1 \
   --train-pass-schedule "1=1:1" "25001=1:3,2:1" "37501=1:5,2:3,3:2"
 ```
 
-Pass-loss weights are aligned to the deepest active passes. For example,
-`--pass-loss-weights 1 1` becomes `[1]` at one pass, `[1, 1]` at two passes,
-and `[0, 0, 1, 1]` at four passes. Evaluation always uses `--max-passes`.
+Pass-loss weights are aligned to the deepest active passes. The LatentFeedback
+weights above become `[1]` at one pass, `[1, 1]` at two passes, and `[2, 1, 1]`
+at three passes. After normalization, three-pass training gives half the direct
+loss to the first pass and splits the other half across the feedback passes.
+Evaluation always uses `--max-passes`.
 
 ## Requirements
 

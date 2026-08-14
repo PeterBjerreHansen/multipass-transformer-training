@@ -53,6 +53,8 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--eval-batches", type=int, default=1)
+    parser.add_argument("--shortest-path-data-dir", default=None)
+    parser.add_argument("--maze-data-dir", default=None)
     parser.add_argument("--extra-passes", type=int, default=4)
     parser.add_argument(
         "--schedule-gap-horizon",
@@ -72,6 +74,10 @@ def _load_args(cli_args) -> tuple[SimpleNamespace, Path]:
     saved = dict(config["args"])
     if cli_args.device is not None:
         saved["device"] = cli_args.device
+    for name in ("shortest_path_data_dir", "maze_data_dir"):
+        value = getattr(cli_args, name)
+        if value is not None:
+            saved[name] = value
     saved["batch_size"] = cli_args.batch_size or max(2, min(int(saved.get("batch_size", 2)), 16))
     if int(saved["batch_size"]) < 2:
         raise ValueError("diagnostics require --batch-size >= 2 for cross-example interventions")
@@ -541,8 +547,11 @@ def diagnose_memory(cli_args) -> Path:
     }
     if bbh_level is not None:
         payload["evaluated_level"] = bbh_level
-    if args.task == "shortest_path":
+    if args.task in {"maze", "shortest_path"}:
         payload["dataset_split"] = "validation"
+    if args.task == "maze":
+        payload["maze_dataset_id"] = args.maze_dataset_id
+    elif args.task == "shortest_path":
         payload["shortest_path_dataset_id"] = args.shortest_path_dataset_id
     output = Path(cli_args.output).resolve() if cli_args.output else run_dir / "diagnostics.json"
     write_json(output, payload)

@@ -205,8 +205,12 @@ def test_maze_training_and_solver_based_evaluation_cli(tmp_path):
         for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     evaluation = next(event for event in events if event["event"] == "eval")
+    assert evaluation["dataset_split"] == "validation"
     for metric in ("optimal_route", "exact_target_route"):
         assert metric in evaluation["metrics"]
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["training_evaluation_split"] == "validation"
+    assert len(config["args"]["maze_dataset_id"]) == 64
 
     eval_dir = tmp_path / "maze_eval"
     _run(
@@ -216,10 +220,13 @@ def test_maze_training_and_solver_based_evaluation_cli(tmp_path):
         "--token-selection", "argmax",
         "--device", "cpu",
         "--eval-batches", "1",
+        "--maze-data-dir", config["args"]["maze_data_dir"],
         "--output-dir", str(eval_dir),
     )
     summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["task"] == "maze"
+    assert summary["dataset_split"] == "test"
+    assert summary["maze_dataset_id"] == config["args"]["maze_dataset_id"]
     assert summary["effective_inference_mode"] == "append_recurrent"
     assert "optimal_route" in summary["metrics"]
     assert "exact_target_route" in summary["metrics"]
@@ -265,6 +272,7 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
         "--train-steps", "1",
         "--lr", "0.00005",
         "--max-grad-norm", "1000000",
+        "--shortest-path-data-dir", config["args"]["shortest_path_data_dir"],
         "--device", "cpu",
         "--run-dir", str(run_dir),
     )
@@ -306,6 +314,7 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
             "--token-selection", "argmax",
             "--device", "cpu",
             "--eval-batches", "1",
+            "--shortest-path-data-dir", config["args"]["shortest_path_data_dir"],
             "--output-dir", str(eval_dir),
         )
         summary = json.loads(
@@ -329,6 +338,7 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
         "--device", "cpu",
         "--batch-size", "2",
         "--eval-batches", "1",
+        "--shortest-path-data-dir", config["args"]["shortest_path_data_dir"],
         "--extra-passes", "1",
         "--schedule-gap-horizon", "4",
         "--output", str(diagnostics),

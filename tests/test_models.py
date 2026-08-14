@@ -13,9 +13,8 @@ from models import (
     LayerNorm,
     MemoryAddTransformer,
     MemoryBlock,
-    MemoryTapeConfig,
-    MemoryTapeTransformer,
     MultiPassConfig,
+    MemoryTapeTransformer,
     TransformerConfig,
     normalize_pass_weights,
     sample_next_token,
@@ -26,7 +25,7 @@ from models import (
 def tiny_memory_model(*, block_size: int = 12, max_passes: int = 3) -> MemoryTapeTransformer:
     torch.manual_seed(7)
     return MemoryTapeTransformer(
-        MemoryTapeConfig(
+        MultiPassConfig(
             block_size=block_size,
             vocab_size=19,
             n_layer=2,
@@ -79,7 +78,7 @@ def test_equivalent_relative_pass_weights_give_identical_loss():
 
 
 def test_zero_memory_produces_exact_zero_cross_attention_output():
-    config = MemoryTapeConfig(8, 17, 1, 2, 8, 2)
+    config = MultiPassConfig(8, 17, 1, 2, 8, 2)
     attention = CausalCrossAttention(config)
     query = torch.randn(2, 6, 8)
     output = attention(query, torch.zeros_like(query))
@@ -87,7 +86,7 @@ def test_zero_memory_produces_exact_zero_cross_attention_output():
 
 
 def test_cross_attention_manual_and_sdpa_paths_agree():
-    config = MemoryTapeConfig(8, 17, 1, 2, 8, 2)
+    config = MultiPassConfig(8, 17, 1, 2, 8, 2)
     attention = CausalCrossAttention(config)
     if not attention.flash:
         pytest.skip("scaled_dot_product_attention is unavailable")
@@ -100,7 +99,7 @@ def test_cross_attention_manual_and_sdpa_paths_agree():
 
 
 def test_memory_block_has_no_first_pass_intercept():
-    config = MemoryTapeConfig(8, 17, 1, 2, 8, 2)
+    config = MultiPassConfig(8, 17, 1, 2, 8, 2)
     block = MemoryBlock(config)
     block.eval()
     hidden = torch.randn(2, 6, 8)
@@ -133,7 +132,7 @@ def test_causal_transformer_structured_output_and_generation():
 @pytest.mark.parametrize(
     ("model_class", "config"),
     [
-        (MemoryTapeTransformer, MemoryTapeConfig(8, 17, 1, 1, 8, 3)),
+        (MemoryTapeTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
         (MemoryAddTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
         (LatentFeedbackTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
     ],
@@ -272,7 +271,7 @@ def test_recurrent_prefill_uses_last_pass_memory_and_append_is_immutable():
 @pytest.mark.parametrize(
     "model",
     [
-        MemoryTapeTransformer(MemoryTapeConfig(10, 17, 1, 1, 8, 3)),
+        MemoryTapeTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
         MemoryAddTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
         LatentFeedbackTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
     ],
@@ -333,7 +332,7 @@ def test_generation_restores_mode_and_validates_sampling_even_for_zero_tokens():
 @pytest.mark.parametrize(
     "model",
     [
-        MemoryTapeTransformer(MemoryTapeConfig(8, 17, 1, 1, 8, 3)),
+        MemoryTapeTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
         MemoryAddTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
         LatentFeedbackTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
     ],

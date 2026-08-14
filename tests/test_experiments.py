@@ -31,12 +31,14 @@ from experiments.diagnose_memory import (
 )
 from experiments.presets import BBH_PRESETS, TRACE_PRESETS
 from experiments.train_bbh import BBH_TASKS, build_fixed_eval_batches, parse_args as parse_bbh_args
-from experiments.train_trace import parse_args as parse_trace_args
+from experiments.train_trace import (
+    parse_args as parse_trace_args,
+    validate_task_args as validate_trace_task_args,
+)
 from models import (
     MemoryAddTransformer,
-    MemoryTapeConfig,
-    MemoryTapeTransformer,
     MultiPassConfig,
+    MemoryTapeTransformer,
 )
 from tasks.bbh import pointer_chasing
 from tasks.trace import maze, othello, shortest_path
@@ -95,7 +97,7 @@ def test_training_presets_default_to_global_gradient_clipping(parser):
 
 def test_evaluation_sampling_is_repeatable_and_does_not_change_global_rng():
     args = _args()
-    model = MemoryTapeTransformer(MemoryTapeConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(2, 5, 2, stoi, device="cpu", rng=random.Random(2))
     before = torch.get_rng_state().clone()
@@ -111,7 +113,7 @@ def test_evaluation_sampling_is_repeatable_and_does_not_change_global_rng():
 
 def test_evaluation_aggregates_conditional_metrics_by_example_count():
     args = _args()
-    model = MemoryTapeTransformer(MemoryTapeConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(
         2,
@@ -151,7 +153,7 @@ def test_evaluation_aggregates_conditional_metrics_by_example_count():
 
 
 def test_memory_interventions_pass_dynamics_and_schedule_gap_return_finite_values():
-    model = MemoryTapeTransformer(MemoryTapeConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(2, 5, 2, stoi, device="cpu", rng=random.Random(2))
     full_output = model(batch.idx)
@@ -243,7 +245,7 @@ def test_memory_add_diagnostics_return_finite_values():
 
 
 def test_gradient_norms_cover_memory_subsystems_after_backward():
-    model = MemoryTapeTransformer(MemoryTapeConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(2, 5, 2, stoi, device="cpu", rng=random.Random(2))
     output = model(batch.idx)
@@ -283,7 +285,7 @@ def _one_step(model, optimizer, tokens, targets):
 
 def test_checkpoint_resume_reproduces_next_optimizer_step(tmp_path):
     torch.manual_seed(101)
-    config = MemoryTapeConfig(8, 13, 1, 1, 8, 3)
+    config = MultiPassConfig(8, 13, 1, 1, 8, 3)
     model = MemoryTapeTransformer(config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     gen = torch.Generator().manual_seed(55)
@@ -340,7 +342,7 @@ def test_warmup_cosine_learning_rate_uses_absolute_steps():
 
 def test_run_directory_cannot_be_reused_without_resume(tmp_path):
     run_dir = tmp_path / "run"
-    model = MemoryTapeTransformer(MemoryTapeConfig(8, 13, 1, 1, 8, 3))
+    model = MemoryTapeTransformer(MultiPassConfig(8, 13, 1, 1, 8, 3))
     args = SimpleNamespace(run_dir=str(run_dir), resume_from=None)
     prepare_run_artifacts(args, model=model, default_root_parts=("test",))
 
@@ -354,7 +356,7 @@ def test_run_directory_cannot_be_reused_without_resume(tmp_path):
 
 def test_resume_preserves_original_run_configuration(tmp_path):
     run_dir = tmp_path / "run"
-    model = MemoryTapeTransformer(MemoryTapeConfig(8, 13, 1, 1, 8, 3))
+    model = MemoryTapeTransformer(MultiPassConfig(8, 13, 1, 1, 8, 3))
     prepare_run_artifacts(
         SimpleNamespace(run_dir=str(run_dir), resume_from=None, marker="original"),
         model=model,
@@ -459,6 +461,13 @@ def test_maze_cli_exposes_compiled_dataset_and_route_options():
                     target_representation,
                     route_policy,
                 ) > 0
+
+
+def test_saved_maze_dataset_id_must_match_current_artifact():
+    args = parse_trace_args(["--preset", "maze_smoke"])
+    args.maze_dataset_id = "0" * 64
+    with pytest.raises(ValueError, match="maze dataset ID mismatch"):
+        validate_trace_task_args(args)
 
 
 def test_main_presets_use_declared_experiment_scales():

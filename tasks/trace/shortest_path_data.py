@@ -219,15 +219,6 @@ def example_id_for(
     return hashlib.sha256(encoded).hexdigest()[:24]
 
 
-def _generate_example(
-    distribution_name: str,
-    path_length: int,
-    seed: int,
-) -> GeneratedExample:
-    _vocab, stoi, _itos = shortest_path.build_generation_vocab(distribution_name)
-    return _generate_example_with_vocab(distribution_name, path_length, seed, stoi)
-
-
 def _generate_example_with_vocab(
     distribution_name: str,
     path_length: int,

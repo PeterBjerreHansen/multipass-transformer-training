@@ -546,6 +546,31 @@ def test_compiled_maze_batch_sampling_is_seeded():
     assert torch.equal(first.targets, second.targets)
 
 
+def test_compiled_maze_eval_batches_are_deterministic_and_without_replacement():
+    kwargs = dict(
+        batch_size=2,
+        num_batches=3,
+        maze_data_dir=maze.DEFAULT_SMOKE_DATA_DIR,
+        input_representation="sparse-cells",
+        target_representation="cell-path",
+        route_policy="astar",
+        split="test",
+        device="cpu",
+    )
+    first = maze.build_maze_eval_batches(**kwargs)
+    second = maze.build_maze_eval_batches(**kwargs)
+    assert len(first) == len(second) == 3
+    for left, right in zip(first, second):
+        assert torch.equal(left.idx, right.idx)
+        assert torch.equal(left.targets, right.targets)
+    rows = torch.nn.utils.rnn.pad_sequence(
+        [row for batch in first for row in batch.idx],
+        batch_first=True,
+        padding_value=-1,
+    )
+    assert torch.unique(rows, dim=0).shape[0] == 6
+
+
 def test_missing_compiled_maze_dataset_does_not_generate_online(tmp_path):
     with pytest.raises(FileNotFoundError, match="never generates maze data online"):
         maze.build_maze_vocab(tmp_path, "sparse-cells", "cell-path", "astar")

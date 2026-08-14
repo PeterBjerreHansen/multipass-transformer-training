@@ -45,13 +45,16 @@ from experiments.pass_schedule import build_pass_scheduler
 from model_factory import ARCHITECTURES
 
 
-_OPTIMIZATION_OVERRIDE_KEYS = (
+_RESUME_OVERRIDE_KEYS = (
     "lr",
     "lr_schedule",
     "min_lr",
     "lr_warmup_steps",
     "lr_decay_steps",
     "max_grad_norm",
+    "shortest_path_data_dir",
+    "maze_data_dir",
+    "othello_data_dir",
 )
 
 
@@ -120,9 +123,9 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--run-dir")
     _add_override(parser, "--resume-from")
     raw_args = parser.parse_args(argv)
-    explicit_optimization_overrides = {
+    explicit_resume_overrides = {
         key: getattr(raw_args, key)
-        for key in _OPTIMIZATION_OVERRIDE_KEYS
+        for key in _RESUME_OVERRIDE_KEYS
         if hasattr(raw_args, key)
     }
     args = resolve_preset_args(
@@ -131,7 +134,7 @@ def parse_args(argv: list[str] | None = None):
         default_preset="shortest_path_main",
         parser=parser,
     )
-    args._explicit_optimization_overrides = explicit_optimization_overrides
+    args._explicit_resume_overrides = explicit_resume_overrides
     return args
 
 
@@ -184,7 +187,7 @@ def _apply_resume_args(
     args,
     checkpoint: dict,
     *,
-    explicit_optimization_overrides: dict[str, object],
+    explicit_resume_overrides: dict[str, object],
 ) -> None:
     saved = checkpoint["args"]
     preserve = {
@@ -198,18 +201,18 @@ def _apply_resume_args(
     for key, value in preserve.items():
         if value is not None:
             setattr(args, key, value)
-    for key, value in explicit_optimization_overrides.items():
+    for key, value in explicit_resume_overrides.items():
         setattr(args, key, value)
 
 
 def run_trace_training(args) -> None:
     checkpoint = None
     resume_step = 0
-    explicit_optimization_overrides = dict(
-        getattr(args, "_explicit_optimization_overrides", {})
+    explicit_resume_overrides = dict(
+        getattr(args, "_explicit_resume_overrides", {})
     )
-    if hasattr(args, "_explicit_optimization_overrides"):
-        delattr(args, "_explicit_optimization_overrides")
+    if hasattr(args, "_explicit_resume_overrides"):
+        delattr(args, "_explicit_resume_overrides")
     if args.resume_from:
         resume_artifacts = resolve_resume_artifacts(args.resume_from)
         checkpoint = load_checkpoint_payload(resume_artifacts.checkpoint_path, device="cpu")
@@ -217,7 +220,7 @@ def run_trace_training(args) -> None:
         _apply_resume_args(
             args,
             checkpoint,
-            explicit_optimization_overrides=explicit_optimization_overrides,
+            explicit_resume_overrides=explicit_resume_overrides,
         )
 
     resolve_device_arg(args)
@@ -231,7 +234,7 @@ def run_trace_training(args) -> None:
     )
     block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
     extra_config = {"script": "experiments.train_trace"}
-    if args.task == "shortest_path":
+    if args.task in {"maze", "shortest_path"}:
         extra_config["training_evaluation_split"] = "validation"
     artifacts = prepare_run_artifacts(
         args,
@@ -285,7 +288,7 @@ def run_trace_training(args) -> None:
         "config": vars(args),
         "model_stats": model_benchmark_stats(model),
     }
-    if args.task == "shortest_path":
+    if args.task in {"maze", "shortest_path"}:
         run_event["dataset_split"] = "validation"
     append_jsonl(artifacts.metrics_path, run_event)
 
@@ -369,7 +372,7 @@ def run_trace_training(args) -> None:
         }
         if pass_scheduler is not None:
             eval_event["pass_schedule"] = pass_scheduler.stats()
-        if args.task == "shortest_path":
+        if args.task in {"maze", "shortest_path"}:
             eval_event["dataset_split"] = "validation"
         append_jsonl(artifacts.metrics_path, eval_event)
         checkpoint_extra = {
