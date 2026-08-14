@@ -6,9 +6,9 @@ This project explores a way to train transformers for recurrent-style inference 
 > [*Full-bandwidth transformer*](https://arxiv.org/abs/2608.08888). The paper
 > independently develops the central multi-pass latent-feedback idea explored
 > here and validates it at much larger scale. It has stronger benchmarks and a
-> fuller analysis. If this repository interests you, read their paper first.
-> I am glad to see the idea work in the big leagues. This repository remains
-> a small testbed for explicit memory-tape variants and controlled state-tracking
+> fuller analysis. If this repository interests you, read their paper. I am 
+> glad to see the idea work in the big leagues. This repository remainsa small 
+> testbed for explicit memory-tape variants and controlled state-tracking
 > experiments.
 
 ## A Motivating Problem: State Tracking
