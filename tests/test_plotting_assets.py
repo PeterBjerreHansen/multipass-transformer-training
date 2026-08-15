@@ -28,7 +28,7 @@ def test_plotting_architecture_registry_matches_model_factory():
 def test_readme_uses_local_figure_paths_and_no_fetch_helper_exists():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     expected = {
-        "bbh_permutation_frontier.png",
+        "s5_permutation_fig.png",
         "inference_pattern_fig.png",
         "generation_fig.png",
         "multipass_training_fig.png",

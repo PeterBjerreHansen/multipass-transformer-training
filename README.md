@@ -33,7 +33,7 @@ The tempting 'fix' would be to let the hidden state $h_{i}^{l}$ at token $i$ dep
 
 But here is an idea: what if we run multiple sequential passes over the same teacher-forced sequence instead of making token $i$ wait for token $i-1$ during training? Token positions remain parallel within each pass, while the passes themselves form a recurrence. Pass 1 writes a memory tape. Pass 2 reads a shifted version of that tape. Pass 3 can read the shifted tape from pass 2, and so on. The hope is that such multi-pass training can teach the model to emit memories that are useful and stable enough to support cheaper recurrent-style memory use at inference time.
 
-### Setup
+### Mathematical Setup
 
 The goal is to train the model to read and write a memory state for each token, and then test whether those memories can be reused during generation. There are many possible memory designs. This project focuses on one memory vector per token per pass.
 
@@ -231,7 +231,7 @@ The launcher reads the task and architecture from `config.json`. It evaluates `b
 Run memory-use and pass-dynamics diagnostics separately:
 
 ```bash
-python3 -m experiments.diagnose_memory \
+uv run python -m experiments.diagnose_memory \
   --input-run-dir results/trace/shortest_path/main/memory_tape/seed_1337 \
   --extra-passes 6 \
   --schedule-gap-horizon 16
@@ -248,11 +248,10 @@ The tracked, output-free notebooks under `figures/` read the current artifact sc
 - `03_deployment_and_othello.ipynb` compares paired `recompute` and `append_recurrent` quality, per-position free-generation drift, teacher-forced schedule gaps, and Othello random-prefix/legal-set metrics.
 - `04_ablation_diagnostics.ipynb` mirrors the merge-decision rules with paired seed deltas, quality–efficiency plots, memory interventions, extra-pass dynamics, and schedule-gap comparisons.
 
-The notebooks do not automatically save or overwrite any tracked figures. Select a comparable result root and uncomment an individual `savefig` line only when a plot is worth keeping. Install the plotting extras and start Jupyter from the repository root:
+The notebooks do not automatically save or overwrite any tracked figures. Select a comparable result root and uncomment an individual `savefig` line only when a plot is worth keeping. Start Jupyter from the repository root:
 
 ```bash
-python3 -m pip install ".[plot]"
-jupyter lab figures/
+uv run jupyter lab figures/
 ```
 
 Measured throughput should only be compared across matched devices, batch sizes, task difficulty, evaluation counts, and output-length distributions. The notebooks show individual seeds alongside unsmoothed medians and avoid confidence bands that would overstate what a three-seed ablation establishes.
@@ -262,7 +261,7 @@ Measured throughput should only be compared across matched devices, batch sizes,
 Baseline transformer:
 
 ```bash
-python3 -m experiments.train_bbh \
+uv run python -m experiments.train_bbh \
   --preset permutation_main \
   --architecture transformer
 ```
@@ -270,7 +269,7 @@ python3 -m experiments.train_bbh \
 MemoryTape:
 
 ```bash
-python3 -m experiments.train_bbh \
+uv run python -m experiments.train_bbh \
   --preset permutation_main \
   --architecture memory_tape
 ```
@@ -278,7 +277,7 @@ python3 -m experiments.train_bbh \
 MemoryAdd:
 
 ```bash
-python3 -m experiments.train_bbh \
+uv run python -m experiments.train_bbh \
   --preset permutation_main \
   --architecture memory_add
 ```
@@ -286,7 +285,7 @@ python3 -m experiments.train_bbh \
 LatentFeedback with a checkpointed probabilistic training-depth schedule:
 
 ```bash
-python3 -m experiments.train_bbh \
+uv run python -m experiments.train_bbh \
   --preset permutation_main \
   --architecture latent_feedback \
   --max-passes 3 \
@@ -304,10 +303,19 @@ Evaluation always uses `--max-passes`.
 
 The code is written in Python and PyTorch. The default device is selected automatically: CUDA when available, then MPS, otherwise CPU.
 
-For local development, install the test dependency group if you want to run pytest:
+Create the project environment with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-python3 -m pip install ".[test]"
+uv sync
+```
+
+This creates `.venv/`, installs the project in editable mode, and installs the
+development tools used by the tests and plotting notebooks. Use `uv run` for
+commands so they always use this environment; activation is optional. Run the
+test suite with:
+
+```bash
+uv run pytest
 ```
 
 To choose a device explicitly, pass `--device cpu`, `--device mps`, or `--device cuda` to the training scripts.

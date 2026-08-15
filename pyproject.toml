@@ -12,9 +12,13 @@ dependencies = [
     "numpy>=1.24",
 ]
 
-[project.optional-dependencies]
-test = ["pytest>=7"]
-plot = ["matplotlib>=3.7", "jupyter>=1", "nbformat>=5"]
+[dependency-groups]
+dev = [
+    "jupyter>=1",
+    "matplotlib>=3.7",
+    "nbformat>=5",
+    "pytest>=7",
+]
 
 [tool.setuptools]
 py-modules = ["model_factory", "models"]
