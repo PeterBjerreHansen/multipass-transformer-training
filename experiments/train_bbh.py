@@ -21,6 +21,7 @@ from experiments.common import (
     gradient_norms,
     load_checkpoint_payload,
     model_benchmark_stats,
+    normalized_pass_loss_weights_by_k,
     prepare_run_artifacts,
     provenance_metadata,
     resolve_device_arg,
@@ -37,7 +38,7 @@ from experiments.common import (
     validate_model_args,
     validate_training_args,
 )
-from experiments.pass_schedule import build_pass_scheduler
+from experiments.pass_mixture import build_pass_mixture
 from experiments.presets import BBH_PRESETS, preset_help_text, resolve_preset_args
 from model_factory import (
     ARCHITECTURES,
@@ -136,20 +137,28 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-layer", type=int)
     _add_override(parser, "--n-head", type=int)
     _add_override(parser, "--n-embd", type=int)
+    _add_override(
+        parser,
+        "--position-encoding",
+        choices=["learned_absolute", "rope"],
+    )
+    _add_override(parser, "--rope-theta", type=float)
     _add_override(parser, "--max-passes", type=int)
     _add_override(parser, "--min-passes", type=int)
     _add_override(parser, "--train-pass-mode", choices=["fixed", "fixed_point"])
     _add_override(parser, "--fixed-point-memory-tol", type=float)
     _add_override(parser, "--fixed-point-kl-tol", type=float)
-    _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
-    _add_override(parser, "--memory-width", type=int)
-    _add_override(parser, "--memory-read-layers", type=int, nargs="+")
     _add_override(
         parser,
-        "--train-pass-schedule",
+        "--pass-loss-weights-by-k",
+        action="append",
+        type=float,
         nargs="+",
-        metavar="START=PASS:WEIGHT,...",
+        metavar="K_OR_WEIGHT",
     )
+    _add_override(parser, "--memory-width", type=int)
+    _add_override(parser, "--memory-read-layers", type=int, nargs="+")
+    _add_override(parser, "--pass-mixture", type=float, nargs="+", metavar="PROBABILITY")
     _add_override(
         parser,
         "--num-nodes",
@@ -271,9 +280,9 @@ def run_answer_curriculum(args) -> None:
     validate_model_args(args)
     validate_training_args(args)
     validate_task_args(args)
-    pass_scheduler = build_pass_scheduler(
+    pass_sampler = build_pass_mixture(
         args,
-        seed=stable_seed(args.seed, "pass-schedule"),
+        seed=stable_seed(args.seed, "pass-mixture"),
     )
     fixed_point_tracker = (
         FixedPointStatsTracker() if args.train_pass_mode == "fixed_point" else None
@@ -297,8 +306,8 @@ def run_answer_curriculum(args) -> None:
         current_level = int(extra["current_level"])
         promotion_history = [tuple(item) for item in extra["promotion_history"]]
         train_rng.setstate(extra["train_rng_state"])
-        if pass_scheduler is not None:
-            pass_scheduler.load_state_dict(extra["pass_scheduler_state"])
+        if pass_sampler is not None:
+            pass_sampler.load_state_dict(extra["pass_mixture_state"])
         best_eval_score = tuple(extra["best_eval_score"])
         saved_best_step = extra["best_eval_step"]
         best_eval_step = None if saved_best_step is None else int(saved_best_step)
@@ -309,6 +318,9 @@ def run_answer_curriculum(args) -> None:
     print(f"device: {args.device}")
     print(f"task: {args.task}")
     print(f"architecture: {args.architecture}")
+    print(f"position_encoding: {args.position_encoding}")
+    if args.position_encoding == "rope":
+        print(f"rope_theta: {args.rope_theta:g}")
     print(f"inference_mode: {effective_inference_mode(args)}")
     print(f"block_size: {block_size}")
     print(f"parameters: {model.get_num_params():,}")
@@ -327,10 +339,12 @@ def run_answer_curriculum(args) -> None:
             )
             print("fixed_point_loss: equal first-pass and final adaptive-pass loss")
         else:
-            normalized = [weight / sum(args.pass_loss_weights) for weight in args.pass_loss_weights]
-            print(f"relative_pass_loss_weights_normalized: {normalized}")
-    if pass_scheduler is not None:
-        print(f"train_pass_schedule: {args.train_pass_schedule}")
+            print(
+                "pass_loss_weights_by_k_normalized: "
+                f"{normalized_pass_loss_weights_by_k(args)}"
+            )
+    if pass_sampler is not None:
+        print(f"pass_mixture_normalized: {pass_sampler.stats()['probabilities']}")
     append_jsonl(
         artifacts.metrics_path,
         {
@@ -361,7 +375,7 @@ def run_answer_curriculum(args) -> None:
             rng=train_rng,
         )
         optimizer.zero_grad(set_to_none=True)
-        sampled_passes = pass_scheduler.sample(step) if pass_scheduler is not None else None
+        sampled_passes = pass_sampler.sample() if pass_sampler is not None else None
         loss, output, pass_losses = forward_and_loss(
             model,
             batch,
@@ -439,8 +453,8 @@ def run_answer_curriculum(args) -> None:
             "best_eval_score": best_eval_score,
             "best_eval_step": best_eval_step,
         }
-        if pass_scheduler is not None:
-            eval_event["pass_schedule"] = pass_scheduler.stats()
+        if pass_sampler is not None:
+            eval_event["pass_mixture"] = pass_sampler.stats()
         if fixed_point_summary is not None:
             eval_event["fixed_point_training"] = fixed_point_summary
         append_jsonl(artifacts.metrics_path, eval_event)
@@ -458,8 +472,8 @@ def run_answer_curriculum(args) -> None:
             "best_eval_score": best_eval_score,
             "best_eval_step": best_eval_step,
         }
-        if pass_scheduler is not None:
-            checkpoint_extra["pass_scheduler_state"] = pass_scheduler.state_dict()
+        if pass_sampler is not None:
+            checkpoint_extra["pass_mixture_state"] = pass_sampler.state_dict()
         save_latest_checkpoint(
             artifacts,
             model=model,

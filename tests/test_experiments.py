@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import random
 from types import SimpleNamespace
 
@@ -54,7 +53,7 @@ def _args() -> SimpleNamespace:
         architecture="memory_tape",
         inference_mode="recompute",
         token_selection="sample",
-        pass_loss_weights=[0, 0, 1],
+        pass_loss_weights_by_k={3: [0, 0, 1]},
         seed=17,
         device="cpu",
         batch_size=2,
@@ -635,7 +634,14 @@ def test_main_bbh_preset_contract_is_frozen():
     common = {
         "model_size": "small",
         "max_passes": 4,
-        "pass_loss_weights": [1.0, 1.0],
+        "position_encoding": "learned_absolute",
+        "rope_theta": 10_000.0,
+        "pass_loss_weights_by_k": {
+            1: [1.0],
+            2: [1.0, 1.0],
+            3: [0.0, 1.0, 1.0],
+            4: [0.0, 0.0, 1.0, 1.0],
+        },
         "batch_size": 64,
         "train_steps": 50_000,
         "lr": 1e-4,
@@ -684,7 +690,14 @@ def test_main_trace_preset_contract_is_frozen():
     common = {
         "model_size": "small",
         "max_passes": 4,
-        "pass_loss_weights": [1.0, 1.0],
+        "position_encoding": "learned_absolute",
+        "rope_theta": 10_000.0,
+        "pass_loss_weights_by_k": {
+            1: [1.0],
+            2: [1.0, 1.0],
+            3: [0.0, 1.0, 1.0],
+            4: [0.0, 0.0, 1.0, 1.0],
+        },
         "max_grad_norm": 5.0,
         "weight_decay": 0.0,
         "seed": 1337,

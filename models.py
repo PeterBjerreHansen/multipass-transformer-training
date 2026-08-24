@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Sequence
 
 import torch
@@ -82,6 +82,8 @@ class TransformerConfig:
     n_layer: int
     n_head: int
     n_embd: int
+    position_encoding: str = field(default="learned_absolute", kw_only=True)
+    rope_theta: float = field(default=10_000.0, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.block_size < 1:
@@ -92,6 +94,12 @@ class TransformerConfig:
             raise ValueError("n_layer, n_head, and n_embd must be positive")
         if self.n_embd % self.n_head != 0:
             raise ValueError(f"n_embd ({self.n_embd}) must be divisible by n_head ({self.n_head})")
+        if self.position_encoding not in {"learned_absolute", "rope"}:
+            raise ValueError("position_encoding must be 'learned_absolute' or 'rope'")
+        if not math.isfinite(self.rope_theta) or self.rope_theta <= 0:
+            raise ValueError("rope_theta must be finite and positive")
+        if self.position_encoding == "rope" and (self.n_embd // self.n_head) % 2:
+            raise ValueError("RoPE requires an even attention-head dimension")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -159,6 +167,42 @@ class MLP(nn.Module):
         return self.c_proj(self.gelu(self.c_fc(x)))
 
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, *, theta: float):
+        super().__init__()
+        if dim % 2:
+            raise ValueError("RoPE requires an even attention-head dimension")
+        inv_freq = 1.0 / (
+            theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        positions = torch.arange(x.shape[-2], device=x.device, dtype=torch.float32)
+        frequencies = torch.outer(positions, self.inv_freq.to(device=x.device))
+        angles = torch.cat((frequencies, frequencies), dim=-1)
+        return angles.cos().to(dtype=x.dtype), angles.sin().to(dtype=x.dtype)
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    first, second = x.chunk(2, dim=-1)
+    return torch.cat((-second, first), dim=-1)
+
+
+def apply_rotary_position_embeddings(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos = cos[None, None, :, :]
+    sin = sin[None, None, :, :]
+    return (
+        q * cos + rotate_half(q) * sin,
+        k * cos + rotate_half(k) * sin,
+    )
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
@@ -167,6 +211,11 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head
+        self.rotary_emb = (
+            RotaryEmbedding(self.head_dim, theta=config.rope_theta)
+            if config.position_encoding == "rope"
+            else None
+        )
         self.flash = hasattr(F, "scaled_dot_product_attention")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -175,6 +224,9 @@ class CausalSelfAttention(nn.Module):
         q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        if self.rotary_emb is not None:
+            cos, sin = self.rotary_emb(v)
+            q, k = apply_rotary_position_embeddings(q, k, cos, sin)
 
         if self.flash:
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
@@ -372,7 +424,11 @@ class CausalTransformer(nn.Module):
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(config.vocab_size, config.n_embd),
-                "wpe": nn.Embedding(config.block_size, config.n_embd),
+                "wpe": (
+                    nn.Embedding(config.block_size, config.n_embd)
+                    if config.position_encoding == "learned_absolute"
+                    else nn.Identity()
+                ),
                 "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
                 "ln_f": LayerNorm(config.n_embd),
             }
@@ -397,7 +453,7 @@ class CausalTransformer(nn.Module):
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         count = sum(parameter.numel() for parameter in self.parameters())
-        if non_embedding:
+        if non_embedding and isinstance(self.transformer.wpe, nn.Embedding):
             count -= self.transformer.wpe.weight.numel()
         return count
 
@@ -409,8 +465,11 @@ class CausalTransformer(nn.Module):
             raise ValueError("input sequence must be non-empty")
         if seq_len > self.config.block_size:
             raise ValueError(f"sequence length {seq_len} exceeds block_size {self.config.block_size}")
-        positions = torch.arange(seq_len, device=idx.device)
-        return self.transformer.wte(idx) + self.transformer.wpe(positions)[None, :, :]
+        hidden = self.transformer.wte(idx)
+        if self.config.position_encoding == "learned_absolute":
+            positions = torch.arange(seq_len, device=idx.device)
+            hidden = hidden + self.transformer.wpe(positions)[None, :, :]
+        return hidden
 
     def forward(self, idx: torch.Tensor) -> MultiPassOutput:
         hidden = self.embed_tokens(idx)
@@ -513,7 +572,11 @@ class MultiPassTransformer(nn.Module):
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(config.vocab_size, config.n_embd),
-                "wpe": nn.Embedding(config.block_size, config.n_embd),
+                "wpe": (
+                    nn.Embedding(config.block_size, config.n_embd)
+                    if config.position_encoding == "learned_absolute"
+                    else nn.Identity()
+                ),
                 "h": self.build_blocks(config),
                 "ln_f": LayerNorm(config.n_embd),
             }
@@ -542,7 +605,7 @@ class MultiPassTransformer(nn.Module):
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         count = sum(parameter.numel() for parameter in self.parameters())
-        if non_embedding:
+        if non_embedding and isinstance(self.transformer.wpe, nn.Embedding):
             count -= self.transformer.wpe.weight.numel()
         return count
 
@@ -554,8 +617,11 @@ class MultiPassTransformer(nn.Module):
             raise ValueError("input sequence must be non-empty")
         if seq_len > self.config.block_size:
             raise ValueError(f"sequence length {seq_len} exceeds block_size {self.config.block_size}")
-        positions = torch.arange(seq_len, device=idx.device)
-        return self.transformer.wte(idx) + self.transformer.wpe(positions)[None, :, :]
+        hidden = self.transformer.wte(idx)
+        if self.config.position_encoding == "learned_absolute":
+            positions = torch.arange(seq_len, device=idx.device)
+            hidden = hidden + self.transformer.wpe(positions)[None, :, :]
+        return hidden
 
     def forward_pass(
         self,

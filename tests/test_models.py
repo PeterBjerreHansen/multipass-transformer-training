@@ -142,6 +142,70 @@ def test_cross_attention_supports_an_independent_memory_width():
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
 
 
+def test_learned_absolute_position_encoding_preserves_the_default_model_exactly():
+    torch.manual_seed(23)
+    default = CausalTransformer(TransformerConfig(8, 17, 2, 2, 8))
+    torch.manual_seed(23)
+    explicit = CausalTransformer(
+        TransformerConfig(
+            8,
+            17,
+            2,
+            2,
+            8,
+            position_encoding="learned_absolute",
+            rope_theta=10_000.0,
+        )
+    )
+    tokens = torch.randint(0, 17, (2, 6))
+
+    assert default.state_dict().keys() == explicit.state_dict().keys()
+    assert all(
+        torch.equal(default.state_dict()[key], explicit.state_dict()[key])
+        for key in default.state_dict()
+    )
+    assert torch.equal(default(tokens).logits, explicit(tokens).logits)
+
+
+def test_rope_replaces_learned_positions_without_changing_memory_cross_attention():
+    rope_config = TransformerConfig(
+        8,
+        17,
+        1,
+        2,
+        8,
+        position_encoding="rope",
+        rope_theta=5_000.0,
+    )
+    model = CausalTransformer(rope_config)
+    assert isinstance(model.transformer.wpe, torch.nn.Identity)
+    assert "transformer.wpe.weight" not in model.state_dict()
+    assert model.transformer.h[0].attn.rotary_emb is not None
+    assert model(torch.randint(0, 17, (2, 6))).logits.shape == (2, 6, 17)
+    assert model.get_num_params() > 0
+
+    learned_config = TransformerConfig(8, 17, 1, 2, 8)
+    torch.manual_seed(29)
+    learned_cross_attention = CausalCrossAttention(learned_config)
+    torch.manual_seed(29)
+    rope_cross_attention = CausalCrossAttention(rope_config)
+    query = torch.randn(2, 6, 8)
+    memory = torch.randn(2, 6, 8)
+    assert torch.equal(
+        learned_cross_attention(query, memory),
+        rope_cross_attention(query, memory),
+    )
+
+
+def test_rope_configuration_requires_valid_theta_and_even_head_dimension():
+    with pytest.raises(ValueError, match="even attention-head dimension"):
+        TransformerConfig(8, 17, 1, 2, 6, position_encoding="rope")
+    with pytest.raises(ValueError, match="finite and positive"):
+        TransformerConfig(8, 17, 1, 1, 8, position_encoding="rope", rope_theta=0)
+    with pytest.raises(ValueError, match="learned_absolute.*rope"):
+        TransformerConfig(8, 17, 1, 1, 8, position_encoding="sinusoidal")
+
+
 def test_memory_block_has_no_first_pass_intercept():
     config = MultiPassConfig(8, 17, 1, 2, 8, 2)
     block = MemoryBlock(config)
@@ -546,7 +610,7 @@ def test_model_factory_constructs_supported_architectures():
         n_head=1,
         n_embd=8,
         max_passes=3,
-        pass_loss_weights=[1],
+        pass_loss_weights_by_k={3: [0, 0, 1]},
     )
     expected = {
         "transformer": CausalTransformer,
@@ -565,6 +629,29 @@ def test_model_factory_constructs_supported_architectures():
         "cpu",
     )
     assert isinstance(sandwich, SandwichLoopTransformer)
+
+
+def test_model_factory_applies_rope_to_self_attention_in_every_architecture():
+    for architecture in (
+        "transformer",
+        "memory_tape",
+        "memory_add",
+        "latent_feedback",
+        "sandwich_loop",
+    ):
+        args = SimpleNamespace(
+            architecture=architecture,
+            n_layer=3 if architecture == "sandwich_loop" else 1,
+            n_head=2,
+            n_embd=8,
+            max_passes=3,
+            position_encoding="rope",
+            rope_theta=10_000.0,
+        )
+        model = build_model(args, 17, 8, "cpu")
+        assert model.config.position_encoding == "rope"
+        assert all(block.attn.rotary_emb is not None for block in model.transformer.h)
+        assert model(torch.randint(0, 17, (2, 6))).logits.shape == (2, 6, 17)
 
 
 def test_architecture_capabilities_distinguish_depth_loops_from_memory_models():

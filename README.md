@@ -15,12 +15,6 @@ This project explores a way to train transformers for recurrent-style inference 
 > which studies Memory Attention, Recirculation, sparse access, and larger-scale
 > language-model experiments.
 
-`main` is intentionally narrow. It keeps the baseline, three aligned-memory
-multi-pass models, one depth-loop reference, the task suites, and the shared
-training/evaluation contracts. Exploratory gates, adaptive halting, stale-memory
-training, and other ablations remain in repository history or dedicated
-branches rather than expanding the supported API.
-
 ## A Motivating Problem: State Tracking
 
 Transformers often struggle with algorithmic state tracking (see, for example, [Li25](https://arxiv.org/abs/2503.02854)), which is why related tasks appear in challenging benchmarks such as BBH (see [Suzgun22](https://arxiv.org/abs/2210.09261)). Transformers have difficulties tracking an increasing number of sequential state changes. The $S_5$ permutation task, for example, looks like "[A,B,C,D,E] swap 1 2 [B,A,C,D,E]" with one swap step.
@@ -336,24 +330,44 @@ uv run python -m experiments.train_bbh \
   --architecture memory_add
 ```
 
-LatentFeedback with a checkpointed probabilistic training-depth schedule:
+Every architecture uses learned absolute position embeddings by default. RoPE
+is an optional backbone-level replacement:
+
+```bash
+uv run python -m experiments.train_bbh \
+  --preset permutation_main \
+  --architecture memory_tape \
+  --position-encoding rope \
+  --rope-theta 10000
+```
+
+RoPE rotates causal self-attention queries and keys in every architecture and
+requires an even attention-head dimension. MemoryTape cross-attention remains
+content-addressed without RoPE; assigning positions to its shifted memory keys
+is intentionally left as a separate ablation.
+
+LatentFeedback with a checkpointed random training-depth mixture:
 
 ```bash
 uv run python -m experiments.train_bbh \
   --preset permutation_main \
   --architecture latent_feedback \
   --max-passes 3 \
-  --pass-loss-weights 2 1 1 \
-  --train-pass-schedule "1=1:1" "25001=1:.75,2:.25" "37501=1:.75,2:.22,3:.03"
+  --pass-mixture 0.75 0.22 0.03 \
+  --pass-loss-weights-by-k 1 1 \
+  --pass-loss-weights-by-k 2 0.5 0.5 \
+  --pass-loss-weights-by-k 3 0.5 0.25 0.25
 ```
 
-Pass-loss weights are aligned to the deepest active passes. The LatentFeedback
-weights above become `[1]` at one pass, `[1, 1]` at two passes, and `[2, 1, 1]`
-at three passes. After normalization, three-pass training gives half the direct
-loss to the first pass and splits the other half across the feedback passes.
-This is the $\lambda=1$ weighting from the FBT objective. The final schedule
-also retains the paper's small three-pass tail, which was important for
-long-horizon stability. Evaluation always uses `--max-passes`.
+The mixture entries correspond to one, two, and three passes. They are
+normalized automatically, and one pass count is sampled for the whole batch on
+each optimizer step. The sampler RNG and histogram are saved in checkpoints.
+Each repeated `--pass-loss-weights-by-k` occurrence begins with K and then
+provides exactly K weights. This makes every sampled objective explicit: K=1
+uses `[1]`, K=2 uses `[0.5, 0.5]`, and K=3 uses
+`[0.5, 0.25, 0.25]`. The K=3 objective gives half the loss to the direct pass
+and splits the other half across the feedback passes. This is the $\lambda=1$
+weighting from the FBT objective. Evaluation always uses `--max-passes`.
 
 Fixed-point training is available for `memory_tape`, `memory_add`, and
 `latent_feedback`:
@@ -364,7 +378,7 @@ uv run python -m experiments.train_bbh \
   --architecture latent_feedback \
   --train-pass-mode fixed_point \
   --min-passes 2 \
-  --max-passes 6 \
+  --max-passes 4 \
   --fixed-point-memory-tol 0.1 \
   --fixed-point-kl-tol 1e-3
 ```
@@ -374,8 +388,8 @@ L-infinity memory change and consecutive-pass logit KL are within tolerance.
 The memory check covers real, non-padding token positions; the KL check covers
 supervised target positions. Halting decisions are detached, but gradients
 flow through every pass that an example executes. Training gives equal weight
-to the first-pass loss and the final adaptive-pass loss. A probabilistic
-`--train-pass-schedule` cannot be combined with this mode.
+to the first-pass loss and the final adaptive-pass loss. `--pass-mixture`
+cannot be combined with this mode.
 
 Evaluation and generation remain fixed at `--max-passes`; fixed-point training
 does not silently change deployment behavior. Metrics log mean executed

@@ -60,6 +60,8 @@ def build_model(args, vocab_size: int, block_size: int, device: str):
         n_layer=args.n_layer,
         n_head=args.n_head,
         n_embd=args.n_embd,
+        position_encoding=getattr(args, "position_encoding", "learned_absolute"),
+        rope_theta=getattr(args, "rope_theta", 10_000.0),
     )
 
     if args.architecture == "transformer":

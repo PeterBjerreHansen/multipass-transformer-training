@@ -14,6 +14,22 @@ class ExperimentPreset:
     values: dict[str, object]
 
 
+def _default_pass_loss_weights_by_k(
+    max_passes: int,
+    *,
+    smoke: bool,
+) -> dict[int, list[float]]:
+    legacy_weights = [1.0] if smoke else [1.0, 1.0]
+    return {
+        passes: (
+            legacy_weights[-passes:]
+            if len(legacy_weights) > passes
+            else [0.0] * (passes - len(legacy_weights)) + legacy_weights
+        )
+        for passes in range(1, max_passes + 1)
+    }
+
+
 def _base_defaults(
     *,
     task: str,
@@ -31,13 +47,18 @@ def _base_defaults(
         "n_layer": 1 if smoke else None,
         "n_head": 1 if smoke else None,
         "n_embd": 16 if smoke else None,
+        "position_encoding": "learned_absolute",
+        "rope_theta": 10_000.0,
         "max_passes": max_passes,
         "min_passes": 2,
         "train_pass_mode": "fixed",
         "fixed_point_memory_tol": 0.1,
         "fixed_point_kl_tol": 1e-3,
-        "pass_loss_weights": [1.0] if smoke else [1.0, 1.0],
-        "train_pass_schedule": None,
+        "pass_loss_weights_by_k": _default_pass_loss_weights_by_k(
+            max_passes,
+            smoke=smoke,
+        ),
+        "pass_mixture": None,
         "memory_width": None,
         "memory_read_layers": None,
         "inference_mode": inference_mode,

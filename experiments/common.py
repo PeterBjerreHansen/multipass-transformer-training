@@ -70,12 +70,80 @@ def apply_model_size_preset(args) -> None:
             setattr(args, key, value)
 
 
+def _coerce_pass_loss_weights_by_k(
+    raw,
+    *,
+    max_passes: int,
+) -> dict[int, list[float]]:
+    if isinstance(raw, dict):
+        entries = raw.items()
+    elif isinstance(raw, (list, tuple)):
+        parsed_entries = []
+        for group in raw:
+            if not isinstance(group, (list, tuple)) or len(group) < 2:
+                raise ValueError(
+                    "each --pass-loss-weights-by-k occurrence must contain K followed by K weights"
+                )
+            raw_passes = float(group[0])
+            if not raw_passes.is_integer():
+                raise ValueError("pass-loss K values must be integers")
+            parsed_entries.append((int(raw_passes), group[1:]))
+        entries = parsed_entries
+    else:
+        raise ValueError("pass_loss_weights_by_k must be a mapping or repeated CLI lists")
+
+    result: dict[int, list[float]] = {}
+    for raw_passes, raw_weights in entries:
+        try:
+            numeric_passes = float(raw_passes)
+        except (TypeError, ValueError) as error:
+            raise ValueError("pass-loss K values must be integers") from error
+        if not numeric_passes.is_integer():
+            raise ValueError("pass-loss K values must be integers")
+        passes = int(numeric_passes)
+        if passes in result:
+            raise ValueError(f"duplicate pass-loss weights for K={passes}")
+        weights = [float(weight) for weight in raw_weights]
+        if len(weights) != passes:
+            raise ValueError(f"pass-loss weights for K={passes} must contain {passes} values")
+        tensor = torch.tensor(weights, dtype=torch.float64)
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"pass-loss weights for K={passes} must be finite")
+        if (tensor < 0).any() or tensor.sum() <= 0:
+            raise ValueError(
+                f"pass-loss weights for K={passes} must be non-negative with a positive sum"
+            )
+        result[passes] = weights
+
+    expected = set(range(1, max_passes + 1))
+    if set(result) != expected:
+        raise ValueError(
+            "--pass-loss-weights-by-k must define every K from 1 through --max-passes"
+        )
+    return dict(sorted(result.items()))
+
+
+def normalized_pass_loss_weights_by_k(args) -> dict[int, list[float]]:
+    return {
+        passes: [weight / sum(weights) for weight in weights]
+        for passes, weights in args.pass_loss_weights_by_k.items()
+    }
+
+
 def validate_model_args(args) -> None:
     apply_model_size_preset(args)
     if args.n_layer < 1 or args.n_head < 1 or args.n_embd < 1:
         raise ValueError("model dimensions must be positive")
     if args.n_embd % args.n_head != 0:
         raise ValueError("--n-embd must be divisible by --n-head")
+    position_encoding = getattr(args, "position_encoding", "learned_absolute")
+    if position_encoding not in {"learned_absolute", "rope"}:
+        raise ValueError("--position-encoding must be learned_absolute or rope")
+    rope_theta = float(getattr(args, "rope_theta", 10_000.0))
+    if not math.isfinite(rope_theta) or rope_theta <= 0:
+        raise ValueError("--rope-theta must be finite and positive")
+    if position_encoding == "rope" and (args.n_embd // args.n_head) % 2:
+        raise ValueError("RoPE requires an even attention-head dimension")
 
     memory_width = getattr(args, "memory_width", None)
     memory_read_layers = getattr(args, "memory_read_layers", None)
@@ -103,13 +171,13 @@ def validate_model_args(args) -> None:
         ):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
-        if getattr(args, "train_pass_schedule", None) is not None:
+        if getattr(args, "pass_mixture", None) is not None:
             raise ValueError(
-                "--train-pass-schedule cannot be combined with fixed-point training"
+                "--pass-mixture cannot be combined with fixed-point training"
             )
 
     if not supports_pass_override(args.architecture):
-        args.pass_loss_weights = None
+        args.pass_loss_weights_by_k = None
         args.inference_mode = "recompute"
         return
 
@@ -118,17 +186,12 @@ def validate_model_args(args) -> None:
     if not supports_append_recurrent(args.architecture):
         args.inference_mode = "recompute"
     if not uses_pass_loss_weights(args.architecture):
-        args.pass_loss_weights = None
+        args.pass_loss_weights_by_k = None
         return
-    if args.pass_loss_weights is None:
-        args.pass_loss_weights = [1.0] * args.max_passes
-    if not 1 <= len(args.pass_loss_weights) <= args.max_passes:
-        raise ValueError("--pass-loss-weights must contain between 1 and --max-passes values")
-    weights = torch.tensor(args.pass_loss_weights, dtype=torch.float64)
-    if not torch.isfinite(weights).all():
-        raise ValueError("--pass-loss-weights must be finite")
-    if (weights < 0).any() or weights.sum() <= 0:
-        raise ValueError("--pass-loss-weights must be non-negative with a positive sum")
+    args.pass_loss_weights_by_k = _coerce_pass_loss_weights_by_k(
+        args.pass_loss_weights_by_k,
+        max_passes=args.max_passes,
+    )
 
 
 def validate_training_args(args) -> None:
@@ -370,7 +433,7 @@ def forward_and_loss(
     loss_output = model.calc_total_loss(
         output,
         batch.targets,
-        loss_weights=args.pass_loss_weights,
+        loss_weights=args.pass_loss_weights_by_k[len(output.passes)],
     )
     return loss_output.loss, output, tuple(item.detach() for item in loss_output.pass_losses)
 
