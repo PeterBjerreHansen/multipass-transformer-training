@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import random
+from dataclasses import dataclass
 from typing import Sequence
+
+from model_factory import supports_pass_override
 
 
 @dataclass(frozen=True)
@@ -120,7 +122,7 @@ def build_pass_scheduler(args, *, seed: int) -> ProbabilisticPassScheduler | Non
     specifications = getattr(args, "train_pass_schedule", None)
     if not specifications:
         return None
-    if args.architecture == "transformer":
+    if not supports_pass_override(args.architecture):
         raise ValueError("--train-pass-schedule requires a multi-pass architecture")
     scheduler = ProbabilisticPassScheduler(specifications, seed=seed)
     if scheduler.maximum_passes > args.max_passes:

@@ -4,15 +4,9 @@ import argparse
 import random
 import time
 
-from tasks.trace.registry import TRACE_TASKS, get_trace_task
-from tasks.trace.maze import (
-    INPUT_REPRESENTATIONS as MAZE_INPUT_REPRESENTATIONS,
-    ROUTE_POLICIES as MAZE_ROUTE_POLICIES,
-    TARGET_REPRESENTATIONS as MAZE_TARGET_REPRESENTATIONS,
-)
 from experiments.common import (
-    apply_learning_rate,
     append_jsonl,
+    apply_learning_rate,
     build_model_and_optimizer,
     clip_gradients,
     effective_inference_mode,
@@ -34,16 +28,25 @@ from experiments.common import (
     save_latest_checkpoint,
     set_seed,
     stable_seed,
-    synchronize_device,
     summarize_gradient_norm_window,
+    synchronize_device,
     update_gradient_norm_window,
     validate_model_args,
     validate_training_args,
 )
-from experiments.presets import TRACE_PRESETS, preset_help_text, resolve_preset_args
 from experiments.pass_schedule import build_pass_scheduler
-from model_factory import ARCHITECTURES
-
+from experiments.presets import TRACE_PRESETS, preset_help_text, resolve_preset_args
+from model_factory import (
+    ARCHITECTURES,
+    supports_pass_override,
+    uses_pass_loss_weights,
+)
+from tasks.trace.maze import (
+    INPUT_REPRESENTATIONS as MAZE_INPUT_REPRESENTATIONS,
+    ROUTE_POLICIES as MAZE_ROUTE_POLICIES,
+    TARGET_REPRESENTATIONS as MAZE_TARGET_REPRESENTATIONS,
+)
+from tasks.trace.registry import TRACE_TASKS, get_trace_task
 
 _RESUME_OVERRIDE_KEYS = (
     "lr",
@@ -75,6 +78,8 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-embd", type=int)
     _add_override(parser, "--max-passes", type=int)
     _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
+    _add_override(parser, "--memory-width", type=int)
+    _add_override(parser, "--memory-read-layers", type=int, nargs="+")
     _add_override(
         parser,
         "--train-pass-schedule",
@@ -272,8 +277,9 @@ def run_trace_training(args) -> None:
         )
     else:
         print(f"lr_schedule: constant | lr {args.lr:.3g}")
-    if args.architecture != "transformer":
+    if supports_pass_override(args.architecture):
         print(f"max_passes: {args.max_passes}")
+    if uses_pass_loss_weights(args.architecture):
         total_weight = sum(args.pass_loss_weights)
         normalized = [weight / total_weight for weight in args.pass_loss_weights]
         print(f"relative_pass_loss_weights_normalized: {normalized}")
@@ -330,7 +336,7 @@ def run_trace_training(args) -> None:
         ]
         gradient_summary = summarize_gradient_norm_window(gradient_norm_window)
         fields.append(format_gradient_norms(gradient_summary))
-        if args.architecture != "transformer":
+        if uses_pass_loss_weights(args.architecture):
             fields.append(f"pass_losses {format_pass_losses(pass_losses)}")
         if sampled_passes is not None:
             fields.append(f"sampled_passes {sampled_passes}")

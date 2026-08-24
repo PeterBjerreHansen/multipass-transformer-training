@@ -5,7 +5,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from model_factory import build_model
+from model_factory import (
+    build_model,
+    supports_append_recurrent,
+    supports_memory_diagnostics,
+    supports_pass_override,
+    uses_pass_loss_weights,
+)
 from models import (
     CausalCrossAttention,
     CausalTransformer,
@@ -13,8 +19,10 @@ from models import (
     LayerNorm,
     MemoryAddTransformer,
     MemoryBlock,
-    MultiPassConfig,
+    MemoryTapeConfig,
     MemoryTapeTransformer,
+    MultiPassConfig,
+    SandwichLoopTransformer,
     TransformerConfig,
     normalize_pass_weights,
     sample_next_token,
@@ -98,6 +106,19 @@ def test_cross_attention_manual_and_sdpa_paths_agree():
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
 
 
+def test_cross_attention_supports_an_independent_memory_width():
+    config = TransformerConfig(8, 17, 1, 2, 8)
+    attention = CausalCrossAttention(config, memory_dim=4)
+    query = torch.randn(2, 6, 8)
+    memory = torch.randn(2, 6, 4)
+    expected = attention(query, memory)
+    attention.flash = False
+    actual = attention(query, memory)
+
+    assert actual.shape == query.shape
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
+
+
 def test_memory_block_has_no_first_pass_intercept():
     config = MultiPassConfig(8, 17, 1, 2, 8, 2)
     block = MemoryBlock(config)
@@ -115,6 +136,83 @@ def test_memory_tape_uses_standard_memory_normalization_and_writer():
     tokens = torch.randint(0, 19, (2, 6))
     output = model.forward_pass(model.embed_tokens(tokens), None)
     assert torch.equal(output.memory_states, model.mem_head(model.ln_mem(output.hidden_states)))
+
+
+def test_memory_tape_supports_reader_placement_and_memory_width():
+    model = MemoryTapeTransformer(
+        MemoryTapeConfig(
+            block_size=12,
+            vocab_size=19,
+            n_layer=4,
+            n_head=2,
+            n_embd=8,
+            max_passes=3,
+            memory_width=4,
+            memory_read_layers=(1, 3),
+        )
+    )
+    tokens = torch.randint(0, 19, (2, 8))
+    output = model(tokens)
+
+    assert model.memory_dim == 4
+    assert model.memory_read_layers == (1, 3)
+    assert [block.cross_attn is not None for block in model.transformer.h] == [
+        False,
+        True,
+        False,
+        True,
+    ]
+    assert all(item.memory_states.shape == (2, 8, 4) for item in output.passes)
+
+    state = model.prefill_recurrent(tokens[:, :5])
+    next_token = state.next_token_logits.argmax(dim=-1, keepdim=True)
+    next_state = model.recurrent_step(state, next_token)
+    assert state.memory_states.shape == (2, 5, 4)
+    assert next_state.memory_states.shape == (2, 6, 4)
+
+
+def test_selective_memory_readers_reduce_parameters_and_validate_config():
+    all_readers = MemoryTapeTransformer(
+        MemoryTapeConfig(12, 19, 4, 2, 8, 3)
+    )
+    one_reader = MemoryTapeTransformer(
+        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(2,))
+    )
+    assert one_reader.get_num_params() < all_readers.get_num_params()
+
+    with pytest.raises(ValueError, match="positive"):
+        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_width=0)
+    with pytest.raises(ValueError, match="duplicates"):
+        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(1, 1))
+    with pytest.raises(ValueError, match="out-of-range"):
+        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(4,))
+
+
+def test_sandwich_loop_matches_manual_prelude_core_coda_execution():
+    model = SandwichLoopTransformer(
+        MultiPassConfig(10, 17, 4, 1, 8, max_passes=3)
+    )
+    tokens = torch.randint(0, 17, (2, 6))
+    hidden = model.transformer.h[0](model.embed_tokens(tokens))
+    for _ in range(2):
+        for block in model.transformer.h[1:-1]:
+            hidden = block(hidden)
+    hidden = model.transformer.h[-1](hidden)
+    hidden = model.transformer.ln_f(hidden)
+
+    output = model(tokens, passes=2)
+    assert len(output.passes) == 1
+    assert torch.equal(output.hidden_states, hidden)
+    assert torch.equal(output.logits, model.lm_head(hidden))
+    with pytest.raises(ValueError, match="between 1 and 3"):
+        model(tokens, passes=4)
+    with pytest.raises(ValueError, match="recompute"):
+        model.generate(tokens[:, :3], 1, inference_mode="append_recurrent")
+
+
+def test_sandwich_loop_requires_a_prelude_core_and_coda():
+    with pytest.raises(ValueError, match="at least three layers"):
+        SandwichLoopTransformer(MultiPassConfig(8, 17, 2, 1, 8, 3))
 
 
 def test_causal_transformer_structured_output_and_generation():
@@ -360,6 +458,26 @@ def test_model_factory_constructs_supported_architectures():
     for architecture, model_class in expected.items():
         model = build_model(SimpleNamespace(architecture=architecture, **base), 17, 8, "cpu")
         assert isinstance(model, model_class)
+
+    sandwich = build_model(
+        SimpleNamespace(architecture="sandwich_loop", **{**base, "n_layer": 3}),
+        17,
+        8,
+        "cpu",
+    )
+    assert isinstance(sandwich, SandwichLoopTransformer)
+
+
+def test_architecture_capabilities_distinguish_depth_loops_from_memory_models():
+    assert supports_pass_override("sandwich_loop")
+    assert not uses_pass_loss_weights("sandwich_loop")
+    assert not supports_append_recurrent("sandwich_loop")
+    assert not supports_memory_diagnostics("sandwich_loop")
+    for architecture in ("memory_tape", "memory_add", "latent_feedback"):
+        assert supports_pass_override(architecture)
+        assert uses_pass_loss_weights(architecture)
+        assert supports_append_recurrent(architecture)
+        assert supports_memory_diagnostics(architecture)
 
 
 @pytest.mark.parametrize("architecture", ["memory_tape", "memory_add"])

@@ -34,6 +34,8 @@ def _base_defaults(
         "max_passes": max_passes,
         "pass_loss_weights": [1.0] if smoke else [1.0, 1.0],
         "train_pass_schedule": None,
+        "memory_width": None,
+        "memory_read_layers": None,
         "inference_mode": inference_mode,
         "token_selection": token_selection,
         "batch_size": 1 if smoke else 64,

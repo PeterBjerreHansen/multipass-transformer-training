@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 
+from model_factory import supports_append_recurrent
 from tasks.common import EOS_TOKEN
 from tasks.trace import maze
 
@@ -37,9 +38,9 @@ def generation_metrics(
 ) -> dict[str, float]:
     """Measure any optimal route and exact imitation of the selected policy."""
     mode = (
-        "recompute"
-        if args.architecture == "transformer"
-        else (inference_mode or args.inference_mode)
+        inference_mode or args.inference_mode
+        if supports_append_recurrent(args.architecture)
+        else "recompute"
     )
     do_sample = getattr(args, "token_selection", "argmax") == "sample"
     _vocab, stoi, itos = maze.build_maze_vocab(

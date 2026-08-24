@@ -33,7 +33,7 @@ from experiments.train_trace import (
     build_training_objects as build_trace_training_objects,
     validate_task_args as validate_trace_task_args,
 )
-from model_factory import is_multi_pass_architecture
+from model_factory import supports_memory_diagnostics
 from models import shift_right
 
 
@@ -497,7 +497,7 @@ def diagnose_memory(cli_args) -> Path:
     if cli_args.schedule_gap_horizon < 1:
         raise ValueError("--schedule-gap-horizon must be positive")
     args, run_dir = _load_args(cli_args)
-    if not is_multi_pass_architecture(args.architecture):
+    if not supports_memory_diagnostics(args.architecture):
         raise ValueError("memory diagnostics require a multi-pass architecture")
     checkpoint_path = resolve_evaluation_checkpoint(
         run_dir,

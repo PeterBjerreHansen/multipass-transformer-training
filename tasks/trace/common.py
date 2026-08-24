@@ -4,6 +4,8 @@ from typing import Callable, Sequence
 
 import torch
 
+from model_factory import supports_append_recurrent
+
 
 @torch.no_grad()
 def trace_generation_metrics(
@@ -20,7 +22,11 @@ def trace_generation_metrics(
     generated non-EOS trace. Padding in target traces is excluded from the legal
     token denominator.
     """
-    mode = "recompute" if args.architecture == "transformer" else (inference_mode or args.inference_mode)
+    mode = (
+        inference_mode or args.inference_mode
+        if supports_append_recurrent(args.architecture)
+        else "recompute"
+    )
     do_sample = getattr(args, "token_selection", "sample") == "sample"
 
     token_legalities: list[float] = []

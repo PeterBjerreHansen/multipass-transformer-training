@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -193,6 +193,8 @@ def test_scheduler_supports_multipass_models_and_respects_configured_maximum():
 
     args.architecture = "memory_tape"
     assert build_pass_scheduler(args, seed=1) is not None
+    args.architecture = "sandwich_loop"
+    assert build_pass_scheduler(args, seed=1) is not None
     args.architecture = "transformer"
     with pytest.raises(ValueError, match="requires a multi-pass architecture"):
         build_pass_scheduler(args, seed=1)
@@ -212,6 +214,23 @@ def test_both_training_clis_parse_pass_schedules():
     ]
     assert parse_bbh_args(["--preset", "permutation_smoke", *options]).train_pass_schedule == options[-2:]
     assert parse_trace_args(["--preset", "maze_smoke", *options]).train_pass_schedule == options[-2:]
+
+
+def test_both_training_clis_parse_memory_tape_levers():
+    options = [
+        "--architecture",
+        "memory_tape",
+        "--memory-width",
+        "8",
+        "--memory-read-layers",
+        "0",
+    ]
+    for args in (
+        parse_bbh_args(["--preset", "permutation_smoke", *options]),
+        parse_trace_args(["--preset", "maze_smoke", *options]),
+    ):
+        assert args.memory_width == 8
+        assert args.memory_read_layers == [0]
 
 
 def test_bbh_smoke_checkpoint_contains_scheduler_state(tmp_path: Path):

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 from typing import Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # -----------------------------------------------------------------------------
 # Outputs and recurrent state
@@ -101,6 +100,29 @@ class MultiPassConfig(TransformerConfig):
             )
 
 
+@dataclass
+class MemoryTapeConfig(MultiPassConfig):
+    """MemoryTape-specific reader placement and memory-vector width."""
+
+    memory_width: int | None = None
+    memory_read_layers: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.memory_width is not None and self.memory_width < 1:
+            raise ValueError("memory_width must be positive when specified")
+        if self.memory_read_layers is not None:
+            if not self.memory_read_layers:
+                raise ValueError("memory_read_layers must not be empty")
+            if len(set(self.memory_read_layers)) != len(self.memory_read_layers):
+                raise ValueError("memory_read_layers must not contain duplicates")
+            if any(
+                layer < 0 or layer >= self.n_layer
+                for layer in self.memory_read_layers
+            ):
+                raise ValueError("memory_read_layers contains an out-of-range layer")
+
+
 # -----------------------------------------------------------------------------
 # Shared components
 # -----------------------------------------------------------------------------
@@ -174,10 +196,13 @@ class Block(nn.Module):
 class CausalCrossAttention(nn.Module):
     """Causal cross-attention into an already right-shifted memory tape."""
 
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config: TransformerConfig, *, memory_dim: int | None = None):
         super().__init__()
+        self.memory_dim = config.n_embd if memory_dim is None else memory_dim
+        if self.memory_dim < 1:
+            raise ValueError("memory_dim must be positive")
         self.c_q = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        self.c_kv = nn.Linear(config.n_embd, 2 * config.n_embd, bias=False)
+        self.c_kv = nn.Linear(self.memory_dim, 2 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -187,8 +212,12 @@ class CausalCrossAttention(nn.Module):
     def forward(self, x: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.shape
         memory_batch, memory_len, memory_dim = memory.shape
-        if (batch_size, dim) != (memory_batch, memory_dim):
-            raise ValueError("x and memory must share batch size and embedding dimension")
+        if (
+            batch_size != memory_batch
+            or dim != self.n_embd
+            or memory_dim != self.memory_dim
+        ):
+            raise ValueError("x and memory have incompatible batch or embedding dimensions")
         if memory_len != seq_len:
             raise ValueError("x and memory must share sequence length")
 
@@ -382,6 +411,40 @@ class CausalTransformer(nn.Module):
             self.train(was_training)
 
 
+class SandwichLoopTransformer(CausalTransformer):
+    """Depth-recurrent decoder with a one-shot prelude and coda.
+
+    The first block contextualizes the token stream once, the middle blocks
+    form a weight-tied recurrent core, and the final block produces the
+    readout. This is depth recurrence rather than append-recurrent token
+    memory, so generation always recomputes the complete prefix.
+    """
+
+    def __init__(self, config: MultiPassConfig):
+        if config.n_layer < 3:
+            raise ValueError("sandwich_loop requires at least three layers")
+        super().__init__(config)
+
+    def forward(
+        self,
+        idx: torch.Tensor,
+        *,
+        passes: int | None = None,
+    ) -> MultiPassOutput:
+        effective_passes = self.config.max_passes if passes is None else int(passes)
+        if not 1 <= effective_passes <= self.config.max_passes:
+            raise ValueError(f"passes must be between 1 and {self.config.max_passes}")
+
+        hidden = self.transformer.h[0](self.embed_tokens(idx))
+        for _ in range(effective_passes):
+            for block in self.transformer.h[1:-1]:
+                hidden = block(hidden)
+        hidden = self.transformer.h[-1](hidden)
+        hidden = self.transformer.ln_f(hidden)
+        logits = self.lm_head(hidden)
+        return MultiPassOutput((PassOutput(logits=logits, hidden_states=hidden),))
+
+
 # -----------------------------------------------------------------------------
 # Multi-pass base and variants
 # -----------------------------------------------------------------------------
@@ -390,20 +453,27 @@ class CausalTransformer(nn.Module):
 class MultiPassTransformer(nn.Module):
     block_cls: type[nn.Module] | None = None
 
+    def build_blocks(self, config: MultiPassConfig) -> nn.ModuleList:
+        if self.block_cls is None:
+            raise ValueError(f"{type(self).__name__} must define block_cls")
+        return nn.ModuleList([self.block_cls(config) for _ in range(config.n_layer)])
+
     def __init__(self, config: MultiPassConfig):
         super().__init__()
         self.config = config
-        if self.block_cls is None:
-            raise ValueError(f"{type(self).__name__} must define block_cls")
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(config.vocab_size, config.n_embd),
                 "wpe": nn.Embedding(config.block_size, config.n_embd),
-                "h": nn.ModuleList([self.block_cls(config) for _ in range(config.n_layer)]),
+                "h": self.build_blocks(config),
                 "ln_f": LayerNorm(config.n_embd),
             }
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    @property
+    def memory_dim(self) -> int:
+        return self.config.n_embd
 
     def finish_initialization(self) -> None:
         self.apply(self._init_weights)
@@ -502,7 +572,7 @@ class MultiPassTransformer(nn.Module):
             raise ValueError("invalid recurrent state shapes")
         if state.memory_states.shape[:2] != state.tokens.shape:
             raise ValueError("recurrent memory must align with recurrent tokens")
-        if state.memory_states.shape[2] != self.config.n_embd:
+        if state.memory_states.shape[2] != self.memory_dim:
             raise ValueError("recurrent memory has the wrong embedding dimension")
         if next_token.ndim != 2 or next_token.shape != (state.tokens.shape[0], 1):
             raise ValueError("next_token must have shape [B, 1]")
@@ -658,20 +728,31 @@ class LatentFeedbackTransformer(MultiPassTransformer):
 
 
 class MemoryBlock(nn.Module):
-    def __init__(self, config: MultiPassConfig):
+    def __init__(self, config: MultiPassConfig, *, read_memory: bool = True):
         super().__init__()
         self.ln_self = LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
-        self.ln_mem_q = LayerNorm(config.n_embd)
-        self.ln_mem_kv = LayerNorm(config.n_embd)
-        self.cross_attn = CausalCrossAttention(config)
+        memory_dim = getattr(config, "memory_width", None) or config.n_embd
+        self.ln_mem_q = LayerNorm(config.n_embd) if read_memory else None
+        self.ln_mem_kv = LayerNorm(memory_dim) if read_memory else None
+        self.cross_attn = (
+            CausalCrossAttention(config, memory_dim=memory_dim)
+            if read_memory
+            else None
+        )
         self.ln_mlp = LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
     def forward(self, x: torch.Tensor, memory_states: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln_self(x))
-        memory_delta = self.cross_attn(self.ln_mem_q(x), self.ln_mem_kv(memory_states))
-        x = x + memory_delta
+        if self.cross_attn is not None:
+            if self.ln_mem_q is None or self.ln_mem_kv is None:
+                raise RuntimeError("memory reader normalization is missing")
+            memory_delta = self.cross_attn(
+                self.ln_mem_q(x),
+                self.ln_mem_kv(memory_states),
+            )
+            x = x + memory_delta
         x = x + self.mlp(self.ln_mlp(x))
         return x
 
@@ -679,11 +760,43 @@ class MemoryBlock(nn.Module):
 class MemoryTapeTransformer(MultiPassTransformer):
     block_cls = MemoryBlock
 
+    def build_blocks(self, config: MultiPassConfig) -> nn.ModuleList:
+        if not isinstance(config, MemoryTapeConfig):
+            raise TypeError("MemoryTapeTransformer requires MemoryTapeConfig")
+        enabled = (
+            set(range(config.n_layer))
+            if config.memory_read_layers is None
+            else set(config.memory_read_layers)
+        )
+        return nn.ModuleList(
+            [
+                MemoryBlock(config, read_memory=layer in enabled)
+                for layer in range(config.n_layer)
+            ]
+        )
+
     def __init__(self, config: MultiPassConfig):
+        if not isinstance(config, MemoryTapeConfig):
+            config = MemoryTapeConfig(**config.to_dict())
         super().__init__(config)
         self.ln_mem = LayerNorm(config.n_embd)
-        self.mem_head = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.mem_head = nn.Linear(config.n_embd, self.memory_dim, bias=False)
         self.finish_initialization()
+
+    @property
+    def memory_dim(self) -> int:
+        config = self.config
+        if not isinstance(config, MemoryTapeConfig):
+            raise TypeError("MemoryTapeTransformer requires MemoryTapeConfig")
+        return config.memory_width or config.n_embd
+
+    @property
+    def memory_read_layers(self) -> tuple[int, ...]:
+        return tuple(
+            layer
+            for layer, block in enumerate(self.transformer.h)
+            if isinstance(block, MemoryBlock) and block.cross_attn is not None
+        )
 
     def forward_pass(
         self,
@@ -691,9 +804,20 @@ class MemoryTapeTransformer(MultiPassTransformer):
         read_memory: torch.Tensor | None,
     ) -> PassOutput:
         if read_memory is None:
-            read_memory = torch.zeros_like(token_stream)
-        if token_stream.shape != read_memory.shape:
-            raise ValueError("token_stream and read_memory must have the same shape")
+            read_memory = token_stream.new_zeros(
+                token_stream.shape[0],
+                token_stream.shape[1],
+                self.memory_dim,
+            )
+        if token_stream.ndim != 3 or read_memory.ndim != 3:
+            raise ValueError("token_stream and read_memory must have shape [B, T, D]")
+        if token_stream.shape[:2] != read_memory.shape[:2]:
+            raise ValueError("token_stream and read_memory must align in batch and sequence")
+        if (
+            token_stream.shape[2] != self.config.n_embd
+            or read_memory.shape[2] != self.memory_dim
+        ):
+            raise ValueError("token_stream or read_memory has the wrong embedding dimension")
         hidden = token_stream
         for block in self.transformer.h:
             hidden = block(hidden, read_memory)

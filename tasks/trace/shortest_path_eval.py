@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 
+from model_factory import supports_append_recurrent
 from tasks.trace import shortest_path
 
 
@@ -17,9 +18,9 @@ def generation_metrics(
 ) -> dict[str, float]:
     """Evaluate exact optimal-path generation and dataset difficulty."""
     mode = (
-        "recompute"
-        if args.architecture == "transformer"
-        else (inference_mode or args.inference_mode)
+        inference_mode or args.inference_mode
+        if supports_append_recurrent(args.architecture)
+        else "recompute"
     )
     do_sample = getattr(args, "token_selection", "argmax") == "sample"
     totals = {

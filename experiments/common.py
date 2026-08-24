@@ -1,24 +1,28 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import random
 import resource
 import shlex
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
 import torch
 
-from model_factory import build_model, is_multi_pass_architecture
-
+from model_factory import (
+    build_model,
+    supports_append_recurrent,
+    supports_pass_override,
+    uses_pass_loss_weights,
+)
 
 MODEL_SIZE_PRESETS = {
     "tiny": {"n_layer": 2, "n_head": 2, "n_embd": 64},
@@ -72,13 +76,27 @@ def validate_model_args(args) -> None:
     if args.n_embd % args.n_head != 0:
         raise ValueError("--n-embd must be divisible by --n-head")
 
-    if args.architecture == "transformer":
+    memory_width = getattr(args, "memory_width", None)
+    memory_read_layers = getattr(args, "memory_read_layers", None)
+    if args.architecture != "memory_tape" and (
+        memory_width is not None or memory_read_layers is not None
+    ):
+        raise ValueError(
+            "--memory-width and --memory-read-layers require --architecture memory_tape"
+        )
+
+    if not supports_pass_override(args.architecture):
         args.pass_loss_weights = None
         args.inference_mode = "recompute"
         return
 
     if args.max_passes < 2:
-        raise ValueError("--max-passes must be at least 2 for multi-pass architectures")
+        raise ValueError("--max-passes must be at least 2 for recurrent architectures")
+    if not supports_append_recurrent(args.architecture):
+        args.inference_mode = "recompute"
+    if not uses_pass_loss_weights(args.architecture):
+        args.pass_loss_weights = None
+        return
     if args.pass_loss_weights is None:
         args.pass_loss_weights = [1.0] * args.max_passes
     if not 1 <= len(args.pass_loss_weights) <= args.max_passes:
@@ -207,10 +225,17 @@ def model_benchmark_stats(model) -> dict[str, int]:
     """Return stable model-size fields for configs and benchmark reports."""
     total = sum(parameter.numel() for parameter in model.parameters())
     non_embedding = model.get_num_params(non_embedding=True)
-    return {
+    result = {
         "total_parameters": int(total),
         "non_embedding_parameters": int(non_embedding),
     }
+    read_layers = getattr(model, "memory_read_layers", None)
+    if read_layers is not None:
+        result.update(
+            memory_width=int(model.memory_dim),
+            memory_reader_layers=len(read_layers),
+        )
+    return result
 
 
 def runtime_resource_stats(device: str | None) -> dict[str, int | float]:
@@ -274,16 +299,16 @@ def token_selection_is_sampling(args) -> bool:
 
 
 def effective_inference_mode(args, requested_mode: str | None = None) -> str:
-    if args.architecture == "transformer":
+    if not supports_append_recurrent(args.architecture):
         return "recompute"
     return requested_mode or args.inference_mode
 
 
 def forward_and_loss(model, batch, args, *, passes: int | None = None):
-    if passes is not None and not is_multi_pass_architecture(args.architecture):
-        raise ValueError("pass overrides require a multi-pass architecture")
+    if passes is not None and not supports_pass_override(args.architecture):
+        raise ValueError("pass overrides require a recurrent architecture")
     output = model(batch.idx, passes=passes) if passes is not None else model(batch.idx)
-    if not is_multi_pass_architecture(args.architecture):
+    if not uses_pass_loss_weights(args.architecture):
         loss = model.calc_loss(output.logits, batch.targets)
         return loss, output, (loss.detach(),)
 

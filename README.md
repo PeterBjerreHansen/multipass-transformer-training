@@ -2,14 +2,24 @@
 
 This project explores a way to train transformers for recurrent-style inference without training them as token time recurrent models. The key idea is to train transformers with multiple passes over the same token-sequence. Earlier passes write per-token memory states; later passes read shifted versions of those memories, giving each token access to deep-layer information from previous token positions while preserving parallel training.
 
-> **Project status (August 2026).** On August 9, 2026, Wang et al. published
-> [*Full-bandwidth transformer*](https://arxiv.org/abs/2608.08888). The paper
-> independently develops the central multi-pass latent-feedback idea explored
-> here and validates it at much larger scale. It has stronger benchmarks and a
-> fuller analysis. If this repository interests you, read their paper. I am
-> glad to see the idea work in the big leagues. This repository remains a small
-> testbed for explicit memory-tape variants and controlled state-tracking
-> experiments.
+> **Project status (August 2026).** Wang et al.'s
+> [*Full-bandwidth transformer*](https://arxiv.org/abs/2608.08888) independently
+> develops the central multi-pass latent-feedback idea explored here and
+> validates it at much larger scale. Mozer et al.'s
+> [*Recirculation*](https://arxiv.org/abs/2608.17981) studies a closely related
+> deep-to-shallow feedback path at inference time. These papers supersede any
+> novelty claim for the broad idea. This repository is now a compact historical
+> reference for the original implementations and controlled state-tracking
+> tasks. Active research continues in
+> [multipass-transformer-memory](https://github.com/PeterBjerreHansen/multipass-transformer-memory),
+> which studies Memory Attention, Recirculation, sparse access, and larger-scale
+> language-model experiments.
+
+`main` is intentionally narrow. It keeps the baseline, three aligned-memory
+multi-pass models, one depth-loop reference, the task suites, and the shared
+training/evaluation contracts. Exploratory gates, adaptive halting, stale-memory
+training, and other ablations remain in repository history or dedicated
+branches rather than expanding the supported API.
 
 ## A Motivating Problem: State Tracking
 
@@ -126,7 +136,10 @@ The plot above comes from an earlier architecture sweep. Some plotted variants a
 
 ## Multi-pass Architectures
 
-`main` supports three multi-pass designs. All use the shared training and inference methods implemented by `MultiPassTransformer`.
+`main` supports three aligned-memory multi-pass designs. All use the shared
+training and inference methods implemented by `MultiPassTransformer`. A
+separate sandwich depth loop is included below, but it deliberately does not
+pretend to support the aligned append-recurrent memory contract.
 
 The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full tape written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared wrapper controls recurrence and shifts the previous tape. Each model owns one complete pass, including its final normalization, language-model head, and memory write.
 
@@ -143,6 +156,18 @@ MemoryTape retains an ordinary causal token decoder. Its decoder is:
 > &nbsp;&nbsp; $`H = H + \mathrm{MLP}(\mathrm{LN}_{\mathrm{mlp}}(H))`$<br>
 
 Causal cross-attention is applied over $R$ as a separately addressable key/value source; the tape is not concatenated with the token stream. Its inclusive causal mask permits query position $t$ to read tape slots $s\leq t$. Because $R_s=M_{s-1}$, this is strict causality with respect to the unshifted tape: only memories from original positions before $t$ are readable. The reader is an ordinary residual branch with no learned gate. On pass one, $R=0$, so the cross-attention contribution is exactly zero and the model begins as a causal token decoder.
+
+By default, every decoder block reads a memory vector of width `n_embd`, which
+preserves the historical implementation. Two small levers cover the useful
+variants without defining new architectures:
+
+- `--memory-read-layers 1 3` installs readers only after those zero-based
+  decoder layers. Omitting the option reads memory at every layer.
+- `--memory-width 64` changes the written memory-vector width while leaving
+  the token residual stream at `n_embd`. Omitting it uses `n_embd`.
+
+Unselected readers are not instantiated, so narrower placement reduces both
+parameters and compute rather than merely masking unused modules.
 
 ### Residual Memory Fusion: The MemoryAdd Architecture
 
@@ -179,6 +204,24 @@ implementation uses the repository's LayerNorm, pass-loss controls, and
 append-recurrent inference contract. It does not reproduce the paper's full
 model or training setup.
 
+### Sandwiched Depth Recurrence
+
+`sandwich_loop` runs the first physical decoder block once as a prelude,
+repeats the middle blocks for `max_passes` iterations, and runs the final block
+once as a coda:
+
+> **Sandwich loop**
+>
+> $`H=\mathrm{Prelude}(X)`$<br>
+> $`\textbf{repeat } K \textbf{ times:}\quad H=\mathrm{Core}(H)`$<br>
+> $`H=\mathrm{Coda}(H)`$
+
+It is a small weight-tied depth-loop reference inspired by the
+`sandwiched-recurrence` branch. It is not Mozer et al.'s token-step
+Recirculation: it recurs only in depth, has no shifted memory tape, and supports
+only `recompute` generation. A pass schedule may vary its core iterations, but
+only the final coda output receives language-model loss.
+
 ## Tasks
 
 The repository has two task families:
@@ -190,11 +233,12 @@ Task generators and task-specific metrics live under `tasks/`. See [tasks/README
 
 ## Running experiments
 
-`main` supports `transformer`, `memory_tape`, `memory_add`, and
-`latent_feedback`. The canonical launchers run all four with the same shared
-pass count, loss weighting, and training procedure. This is a controlled
-architecture comparison, not a reproduction of LatentFeedback's paper-specific
-training protocol. The separate scheduled example below tests that protocol.
+`main` supports `transformer`, `memory_tape`, `memory_add`, `latent_feedback`,
+and `sandwich_loop`. The canonical launchers keep the original four-model
+aligned-memory comparison by default; `sandwich_loop` is opt-in because it has
+a different compute and inference contract. This is a controlled architecture
+comparison, not a reproduction of LatentFeedback's paper-specific training
+protocol. The separate scheduled example below tests its central pass policy.
 
 ```bash
 bash scripts/bbh/run.sh
@@ -274,6 +318,16 @@ uv run python -m experiments.train_bbh \
   --architecture memory_tape
 ```
 
+MemoryTape with two readers and a narrow memory vector:
+
+```bash
+uv run python -m experiments.train_bbh \
+  --preset permutation_main \
+  --architecture memory_tape \
+  --memory-read-layers 1 3 \
+  --memory-width 64
+```
+
 MemoryAdd:
 
 ```bash
@@ -290,14 +344,25 @@ uv run python -m experiments.train_bbh \
   --architecture latent_feedback \
   --max-passes 3 \
   --pass-loss-weights 2 1 1 \
-  --train-pass-schedule "1=1:1" "25001=1:3,2:1" "37501=1:5,2:3,3:2"
+  --train-pass-schedule "1=1:1" "25001=1:.75,2:.25" "37501=1:.75,2:.22,3:.03"
 ```
 
 Pass-loss weights are aligned to the deepest active passes. The LatentFeedback
 weights above become `[1]` at one pass, `[1, 1]` at two passes, and `[2, 1, 1]`
 at three passes. After normalization, three-pass training gives half the direct
 loss to the first pass and splits the other half across the feedback passes.
-Evaluation always uses `--max-passes`.
+This is the $\lambda=1$ weighting from the FBT objective. The final schedule
+also retains the paper's small three-pass tail, which was important for
+long-horizon stability. Evaluation always uses `--max-passes`.
+
+Sandwich depth loop:
+
+```bash
+uv run python -m experiments.train_bbh \
+  --preset permutation_main \
+  --architecture sandwich_loop \
+  --max-passes 4
+```
 
 ## Requirements
 
