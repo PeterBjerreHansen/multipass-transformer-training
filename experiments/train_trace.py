@@ -5,6 +5,7 @@ import random
 import time
 
 from experiments.common import (
+    FixedPointStatsTracker,
     append_jsonl,
     apply_learning_rate,
     build_model_and_optimizer,
@@ -77,6 +78,10 @@ def parse_args(argv: list[str] | None = None):
     _add_override(parser, "--n-head", type=int)
     _add_override(parser, "--n-embd", type=int)
     _add_override(parser, "--max-passes", type=int)
+    _add_override(parser, "--min-passes", type=int)
+    _add_override(parser, "--train-pass-mode", choices=["fixed", "fixed_point"])
+    _add_override(parser, "--fixed-point-memory-tol", type=float)
+    _add_override(parser, "--fixed-point-kl-tol", type=float)
     _add_override(parser, "--pass-loss-weights", type=float, nargs="*")
     _add_override(parser, "--memory-width", type=int)
     _add_override(parser, "--memory-read-layers", type=int, nargs="+")
@@ -231,6 +236,9 @@ def run_trace_training(args) -> None:
         args,
         seed=stable_seed(args.seed, "pass-schedule"),
     )
+    fixed_point_tracker = (
+        FixedPointStatsTracker() if args.train_pass_mode == "fixed_point" else None
+    )
     block_size, vocab, stoi, _itos, model, optimizer = build_training_objects(args)
     task = get_trace_task(args.task)
     validation_metadata = task.evaluation_metadata(
@@ -280,9 +288,21 @@ def run_trace_training(args) -> None:
     if supports_pass_override(args.architecture):
         print(f"max_passes: {args.max_passes}")
     if uses_pass_loss_weights(args.architecture):
-        total_weight = sum(args.pass_loss_weights)
-        normalized = [weight / total_weight for weight in args.pass_loss_weights]
-        print(f"relative_pass_loss_weights_normalized: {normalized}")
+        if args.train_pass_mode == "fixed_point":
+            print(
+                "train_pass_mode: fixed_point | "
+                f"min_passes {args.min_passes} | max_passes {args.max_passes}"
+            )
+            print(
+                "fixed_point_tolerances: "
+                f"memory {args.fixed_point_memory_tol:g} | "
+                f"logit_kl {args.fixed_point_kl_tol:g}"
+            )
+            print("fixed_point_loss: equal first-pass and final adaptive-pass loss")
+        else:
+            total_weight = sum(args.pass_loss_weights)
+            normalized = [weight / total_weight for weight in args.pass_loss_weights]
+            print(f"relative_pass_loss_weights_normalized: {normalized}")
     if pass_scheduler is not None:
         print(f"train_pass_schedule: {args.train_pass_schedule}")
     run_event = {
@@ -310,12 +330,15 @@ def run_trace_training(args) -> None:
         batch = build_task_batch(args, stoi, train_rng, split="train")
         optimizer.zero_grad(set_to_none=True)
         sampled_passes = pass_scheduler.sample(step) if pass_scheduler is not None else None
-        loss, _output, pass_losses = forward_and_loss(
+        loss, output, pass_losses = forward_and_loss(
             model,
             batch,
             args,
             passes=sampled_passes,
+            fixed_point_training=args.train_pass_mode == "fixed_point",
         )
+        if fixed_point_tracker is not None:
+            fixed_point_tracker.observe(output)
         loss.backward()
         update_gradient_norm_window(gradient_norm_window, gradient_norms(model))
         clip_gradients(model, args.max_grad_norm)
@@ -340,6 +363,14 @@ def run_trace_training(args) -> None:
             fields.append(f"pass_losses {format_pass_losses(pass_losses)}")
         if sampled_passes is not None:
             fields.append(f"sampled_passes {sampled_passes}")
+        fixed_point_summary = (
+            fixed_point_tracker.summary() if fixed_point_tracker is not None else None
+        )
+        if fixed_point_summary is not None:
+            fields.append(f"mean_passes {fixed_point_summary['mean_passes']:.2f}")
+            fields.append(
+                f"converged {fixed_point_summary['converged_fraction']:.3f}"
+            )
         print(format_checkpoint_line(f"step {step}", fields))
 
         metrics = evaluate_prebuilt_batches(
@@ -377,6 +408,8 @@ def run_trace_training(args) -> None:
         }
         if pass_scheduler is not None:
             eval_event["pass_schedule"] = pass_scheduler.stats()
+        if fixed_point_summary is not None:
+            eval_event["fixed_point_training"] = fixed_point_summary
         eval_event.update(validation_metadata)
         append_jsonl(artifacts.metrics_path, eval_event)
         checkpoint_extra = {
@@ -408,6 +441,8 @@ def run_trace_training(args) -> None:
         window_start = time.perf_counter()
         window_tokens = 0
         gradient_norm_window = {}
+        if fixed_point_tracker is not None:
+            fixed_point_tracker.reset()
 
     append_jsonl(artifacts.metrics_path, {"event": "run_end", "task": args.task})
     print(f"run_dir: {artifacts.run_dir}")

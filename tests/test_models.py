@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -8,6 +8,7 @@ import torch
 from model_factory import (
     build_model,
     supports_append_recurrent,
+    supports_fixed_point_training,
     supports_memory_diagnostics,
     supports_pass_override,
     uses_pass_loss_weights,
@@ -22,9 +23,12 @@ from models import (
     MemoryTapeConfig,
     MemoryTapeTransformer,
     MultiPassConfig,
+    PassOutput,
     SandwichLoopTransformer,
     TransformerConfig,
+    logit_kl_per_example,
     normalize_pass_weights,
+    relative_linf_residual_per_example,
     sample_next_token,
     shift_right,
 )
@@ -73,6 +77,25 @@ def test_relative_pass_weights_follow_the_active_depth():
     assert torch.equal(three, torch.tensor([0.0, 0.5, 0.5]))
     assert torch.equal(two, torch.tensor([0.5, 0.5]))
     assert torch.equal(one, torch.tensor([1.0]))
+
+
+def test_fixed_point_metrics_ignore_masked_positions():
+    previous_state = torch.tensor([[[1.0], [1_000.0]]])
+    current_state = torch.tensor([[[2.0], [-1_000.0]]])
+    valid = torch.tensor([[True, False]])
+    residual = relative_linf_residual_per_example(
+        previous_state,
+        current_state,
+        valid,
+    )
+    assert residual.item() == pytest.approx(0.5)
+
+    previous_logits = torch.tensor([[[2.0, 0.0], [100.0, -100.0]]])
+    current_logits = torch.tensor([[[2.0, 0.0], [-100.0, 100.0]]])
+    assert logit_kl_per_example(previous_logits, current_logits, valid).item() == 0.0
+
+    with pytest.raises(ValueError, match="at least one valid position"):
+        logit_kl_per_example(previous_logits, current_logits, torch.zeros_like(valid))
 
 
 def test_equivalent_relative_pass_weights_give_identical_loss():
@@ -245,6 +268,82 @@ def test_multipass_models_return_all_passes_and_finite_losses(model_class, confi
     assert torch.isfinite(model.calc_total_loss(output, targets, [1]).loss)
 
 
+def test_fixed_point_forward_halts_and_freezes_each_example_independently():
+    model = tiny_memory_model(max_passes=4)
+    batch_sizes: list[int] = []
+
+    def scripted_forward_pass(self, token_stream, read_memory):
+        del read_memory
+        call = len(batch_sizes) + 1
+        batch_size, seq_len, _ = token_stream.shape
+        batch_sizes.append(batch_size)
+        if call == 1:
+            levels = token_stream.new_ones(batch_size)
+        elif call == 2:
+            levels = token_stream.new_tensor([1.0, 2.0])
+        else:
+            levels = token_stream.new_full((batch_size,), 2.0)
+        memory = levels[:, None, None].expand(batch_size, seq_len, self.memory_dim)
+        hidden = token_stream.new_zeros(batch_size, seq_len, self.config.n_embd)
+        logits = token_stream.new_zeros(batch_size, seq_len, self.config.vocab_size)
+        logits[..., 0] = levels[:, None]
+        return PassOutput(logits=logits, hidden_states=hidden, memory_states=memory)
+
+    model.forward_pass = MethodType(scripted_forward_pass, model)
+    tokens = torch.randint(0, 19, (2, 6))
+    valid = torch.ones_like(tokens, dtype=torch.bool)
+    output = model.forward_fixed_point(
+        tokens,
+        min_passes=2,
+        max_passes=4,
+        memory_tolerance=0.0,
+        kl_tolerance=0.0,
+        memory_positions=valid,
+        logit_positions=valid,
+    )
+
+    assert batch_sizes == [2, 2, 1]
+    assert output.halting is not None
+    assert output.halting.pass_counts.tolist() == [2, 3]
+    assert output.halting.converged.tolist() == [True, True]
+    assert torch.equal(output.final_memory[:, 0, 0], torch.tensor([1.0, 2.0]))
+    assert torch.equal(output.passes[1].logits[0], output.passes[2].logits[0])
+
+
+def test_fixed_point_forward_stops_unconverged_examples_at_the_cap():
+    model = tiny_memory_model(max_passes=3)
+    call = 0
+
+    def changing_forward_pass(self, token_stream, read_memory):
+        nonlocal call
+        del read_memory
+        call += 1
+        batch_size, seq_len, _ = token_stream.shape
+        level = float(call)
+        memory = token_stream.new_full((batch_size, seq_len, self.memory_dim), level)
+        hidden = token_stream.new_zeros(batch_size, seq_len, self.config.n_embd)
+        logits = token_stream.new_zeros(batch_size, seq_len, self.config.vocab_size)
+        logits[..., 0] = level
+        return PassOutput(logits=logits, hidden_states=hidden, memory_states=memory)
+
+    model.forward_pass = MethodType(changing_forward_pass, model)
+    tokens = torch.randint(0, 19, (2, 6))
+    valid = torch.ones_like(tokens, dtype=torch.bool)
+    output = model.forward_fixed_point(
+        tokens,
+        min_passes=2,
+        max_passes=3,
+        memory_tolerance=0.0,
+        kl_tolerance=0.0,
+        memory_positions=valid,
+        logit_positions=valid,
+    )
+
+    assert output.halting is not None
+    assert output.halting.pass_counts.tolist() == [3, 3]
+    assert output.halting.converged.tolist() == [False, False]
+
+
 def test_memory_tape_is_causal_in_tokens_and_emitted_memory():
     model = tiny_memory_model()
     model.eval()
@@ -289,7 +388,7 @@ def test_final_pass_loss_reaches_memory_writer_and_reader():
 def test_memory_add_starts_with_a_small_memory_residual():
     model = MemoryAddTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3))
     tokens = torch.randint(0, 17, (2, 6))
-    output = model(tokens)
+    model(tokens)
 
     projection = model.memory_projection.weight
     assert torch.count_nonzero(projection).item() > 0
@@ -471,11 +570,13 @@ def test_model_factory_constructs_supported_architectures():
 def test_architecture_capabilities_distinguish_depth_loops_from_memory_models():
     assert supports_pass_override("sandwich_loop")
     assert not uses_pass_loss_weights("sandwich_loop")
+    assert not supports_fixed_point_training("sandwich_loop")
     assert not supports_append_recurrent("sandwich_loop")
     assert not supports_memory_diagnostics("sandwich_loop")
     for architecture in ("memory_tape", "memory_add", "latent_feedback"):
         assert supports_pass_override(architecture)
         assert uses_pass_loss_weights(architecture)
+        assert supports_fixed_point_training(architecture)
         assert supports_append_recurrent(architecture)
         assert supports_memory_diagnostics(architecture)
 

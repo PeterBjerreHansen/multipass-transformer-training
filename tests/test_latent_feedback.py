@@ -9,6 +9,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from experiments.common import (
+    FixedPointStatsTracker,
+    forward_and_loss,
+    validate_model_args,
+)
 from experiments.pass_schedule import (
     ProbabilisticPassScheduler,
     build_pass_scheduler,
@@ -17,6 +22,7 @@ from experiments.pass_schedule import (
 from experiments.train_bbh import parse_args as parse_bbh_args
 from experiments.train_trace import parse_args as parse_trace_args
 from models import LatentFeedbackTransformer, MultiPassConfig
+from tasks.common import SymbolicBatch
 
 
 def tiny_model(*, max_passes: int = 3) -> LatentFeedbackTransformer:
@@ -233,6 +239,114 @@ def test_both_training_clis_parse_memory_tape_levers():
         assert args.memory_read_layers == [0]
 
 
+def test_both_training_clis_parse_fixed_point_training():
+    options = [
+        "--architecture",
+        "latent_feedback",
+        "--max-passes",
+        "6",
+        "--min-passes",
+        "2",
+        "--train-pass-mode",
+        "fixed_point",
+        "--fixed-point-memory-tol",
+        "0.1",
+        "--fixed-point-kl-tol",
+        "0.001",
+    ]
+    for args in (
+        parse_bbh_args(["--preset", "permutation_smoke", *options]),
+        parse_trace_args(["--preset", "maze_smoke", *options]),
+    ):
+        assert args.train_pass_mode == "fixed_point"
+        assert args.min_passes == 2
+        assert args.max_passes == 6
+        assert args.fixed_point_memory_tol == pytest.approx(0.1)
+        assert args.fixed_point_kl_tol == pytest.approx(1e-3)
+
+
+def test_fixed_point_training_uses_first_and_final_loss_and_tracks_halting():
+    model = tiny_model(max_passes=3)
+    tokens = torch.randint(0, 17, (2, 6))
+    targets = torch.randint(0, 17, (2, 6))
+    batch = SymbolicBatch(
+        idx=tokens,
+        targets=targets,
+        prompt_lengths=torch.tensor([2, 3]),
+        output_lengths=torch.tensor([5, 4]),
+    )
+    args = SimpleNamespace(
+        architecture="latent_feedback",
+        min_passes=2,
+        max_passes=3,
+        fixed_point_memory_tol=0.0,
+        fixed_point_kl_tol=0.0,
+        pass_loss_weights=[1.0],
+    )
+
+    loss, output, pass_losses = forward_and_loss(
+        model,
+        batch,
+        args,
+        fixed_point_training=True,
+    )
+    expected = torch.stack(
+        (
+            model.calc_loss(output.passes[0].logits, targets),
+            model.calc_loss(output.logits, targets),
+        )
+    ).mean()
+    assert torch.equal(loss, expected)
+    assert len(pass_losses) == 2
+
+    _eval_loss, fixed_output, _eval_pass_losses = forward_and_loss(model, batch, args)
+    assert fixed_output.halting is None
+    assert len(fixed_output.passes) == 3
+
+    tracker = FixedPointStatsTracker()
+    tracker.observe(output)
+    summary = tracker.summary()
+    assert summary["mean_passes"] == pytest.approx(3.0)
+    assert summary["pass_histogram"] == {3: 2}
+    assert summary["converged_fraction"] == pytest.approx(0.0)
+
+    loss.backward()
+    assert model.feedback_value.weight.grad is not None
+    assert model.feedback_value.weight.grad.abs().sum() > 0
+
+
+def test_fixed_point_training_rejects_incompatible_options():
+    args = parse_bbh_args(
+        [
+            "--preset",
+            "permutation_smoke",
+            "--architecture",
+            "sandwich_loop",
+            "--n-layer",
+            "3",
+            "--train-pass-mode",
+            "fixed_point",
+        ]
+    )
+    with pytest.raises(ValueError, match="aligned-memory"):
+        validate_model_args(args)
+
+    args = parse_bbh_args(
+        [
+            "--preset",
+            "permutation_smoke",
+            "--architecture",
+            "latent_feedback",
+            "--train-pass-mode",
+            "fixed_point",
+            "--train-pass-schedule",
+            "1=2:1",
+        ]
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        validate_model_args(args)
+
+
 def test_bbh_smoke_checkpoint_contains_scheduler_state(tmp_path: Path):
     run_dir = tmp_path / "latent_feedback"
     command = [
@@ -265,3 +379,45 @@ def test_bbh_smoke_checkpoint_contains_scheduler_state(tmp_path: Path):
     ]
     evaluation = next(event for event in events if event["event"] == "eval")
     assert evaluation["pass_schedule"]["histogram"] == {"2": 1}
+
+
+def test_bbh_fixed_point_smoke_logs_halting_diagnostics(tmp_path: Path):
+    run_dir = tmp_path / "fixed_point"
+    command = [
+        sys.executable,
+        "-m",
+        "experiments.train_bbh",
+        "--preset",
+        "permutation_smoke",
+        "--architecture",
+        "latent_feedback",
+        "--max-passes",
+        "3",
+        "--min-passes",
+        "2",
+        "--train-pass-mode",
+        "fixed_point",
+        "--fixed-point-memory-tol",
+        "1000000",
+        "--fixed-point-kl-tol",
+        "1000000",
+        "--device",
+        "cpu",
+        "--run-dir",
+        str(run_dir),
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert "mean_passes 2.00" in result.stdout
+    assert "converged 1.000" in result.stdout
+    checkpoint = torch.load(run_dir / "latest.pt", map_location="cpu", weights_only=False)
+    assert checkpoint["args"]["train_pass_mode"] == "fixed_point"
+    events = [
+        json.loads(line)
+        for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    evaluation = next(event for event in events if event["event"] == "eval")
+    fixed_point = evaluation["fixed_point_training"]
+    assert fixed_point["mean_passes"] == pytest.approx(2.0)
+    assert fixed_point["pass_histogram"] == {"2": 1}
+    assert fixed_point["converged_fraction"] == pytest.approx(1.0)

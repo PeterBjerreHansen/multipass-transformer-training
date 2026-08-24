@@ -20,6 +20,7 @@ import torch
 from model_factory import (
     build_model,
     supports_append_recurrent,
+    supports_fixed_point_training,
     supports_pass_override,
     uses_pass_loss_weights,
 )
@@ -84,6 +85,28 @@ def validate_model_args(args) -> None:
         raise ValueError(
             "--memory-width and --memory-read-layers require --architecture memory_tape"
         )
+
+    train_pass_mode = getattr(args, "train_pass_mode", "fixed")
+    if train_pass_mode not in {"fixed", "fixed_point"}:
+        raise ValueError("--train-pass-mode must be fixed or fixed_point")
+    if train_pass_mode == "fixed_point":
+        if not supports_fixed_point_training(args.architecture):
+            raise ValueError(
+                "--train-pass-mode fixed_point requires an aligned-memory multipass architecture"
+            )
+        min_passes = int(args.min_passes)
+        if not 2 <= min_passes <= args.max_passes:
+            raise ValueError("fixed-point pass limits must satisfy 2 <= --min-passes <= --max-passes")
+        for name, value in (
+            ("--fixed-point-memory-tol", args.fixed_point_memory_tol),
+            ("--fixed-point-kl-tol", args.fixed_point_kl_tol),
+        ):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if getattr(args, "train_pass_schedule", None) is not None:
+            raise ValueError(
+                "--train-pass-schedule cannot be combined with fixed-point training"
+            )
 
     if not supports_pass_override(args.architecture):
         args.pass_loss_weights = None
@@ -304,9 +327,41 @@ def effective_inference_mode(args, requested_mode: str | None = None) -> str:
     return requested_mode or args.inference_mode
 
 
-def forward_and_loss(model, batch, args, *, passes: int | None = None):
+def _real_token_positions(batch) -> torch.Tensor:
+    valid_lengths = batch.prompt_lengths + batch.output_lengths - 1
+    positions = torch.arange(batch.idx.shape[1], device=batch.idx.device)[None, :]
+    return positions < valid_lengths[:, None]
+
+
+def forward_and_loss(
+    model,
+    batch,
+    args,
+    *,
+    passes: int | None = None,
+    fixed_point_training: bool = False,
+):
     if passes is not None and not supports_pass_override(args.architecture):
         raise ValueError("pass overrides require a recurrent architecture")
+    if fixed_point_training:
+        if passes is not None:
+            raise ValueError("fixed-point training cannot use a sampled pass override")
+        if not supports_fixed_point_training(args.architecture):
+            raise ValueError("fixed-point training requires an aligned-memory multipass model")
+        output = model.forward_fixed_point(
+            batch.idx,
+            min_passes=args.min_passes,
+            max_passes=args.max_passes,
+            memory_tolerance=args.fixed_point_memory_tol,
+            kl_tolerance=args.fixed_point_kl_tol,
+            memory_positions=_real_token_positions(batch),
+            logit_positions=batch.targets.ne(-1),
+        )
+        first_loss = model.calc_loss(output.passes[0].logits, batch.targets)
+        final_loss = model.calc_loss(output.logits, batch.targets)
+        loss = torch.stack((first_loss, final_loss)).mean()
+        return loss, output, (first_loss.detach(), final_loss.detach())
+
     output = model(batch.idx, passes=passes) if passes is not None else model(batch.idx)
     if not uses_pass_loss_weights(args.architecture):
         loss = model.calc_loss(output.logits, batch.targets)
@@ -318,6 +373,54 @@ def forward_and_loss(model, batch, args, *, passes: int | None = None):
         loss_weights=args.pass_loss_weights,
     )
     return loss_output.loss, output, tuple(item.detach() for item in loss_output.pass_losses)
+
+
+class FixedPointStatsTracker:
+    """Accumulate fixed-point training diagnostics for one logging window."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.pass_histogram: dict[int, int] = {}
+        self.total_examples = 0
+        self.converged_examples = 0
+        self.residual_sum = 0.0
+        self.residual_max = 0.0
+        self.kl_sum = 0.0
+        self.kl_max = 0.0
+
+    def observe(self, output) -> None:
+        halting = output.halting
+        if halting is None:
+            raise ValueError("fixed-point output is missing halting statistics")
+        counts = [int(value) for value in halting.pass_counts.cpu().tolist()]
+        residual = halting.relative_linf_residual.float()
+        logit_kl = halting.logit_kl.float()
+        self.total_examples += len(counts)
+        self.converged_examples += int(halting.converged.sum().item())
+        self.residual_sum += float(residual.sum().item())
+        self.residual_max = max(self.residual_max, float(residual.max().item()))
+        self.kl_sum += float(logit_kl.sum().item())
+        self.kl_max = max(self.kl_max, float(logit_kl.max().item()))
+        for count in counts:
+            self.pass_histogram[count] = self.pass_histogram.get(count, 0) + 1
+
+    def summary(self) -> dict[str, object]:
+        if self.total_examples < 1:
+            raise ValueError("no fixed-point examples have been observed")
+        total_passes = sum(
+            passes * examples for passes, examples in self.pass_histogram.items()
+        )
+        return {
+            "mean_passes": total_passes / self.total_examples,
+            "pass_histogram": dict(sorted(self.pass_histogram.items())),
+            "converged_fraction": self.converged_examples / self.total_examples,
+            "final_memory_residual_mean": self.residual_sum / self.total_examples,
+            "final_memory_residual_max": self.residual_max,
+            "final_logit_kl_mean": self.kl_sum / self.total_examples,
+            "final_logit_kl_max": self.kl_max,
+        }
 
 
 def gradient_norms(model) -> dict[str, float]:

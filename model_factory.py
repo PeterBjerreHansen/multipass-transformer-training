@@ -41,6 +41,10 @@ def uses_pass_loss_weights(architecture: str) -> bool:
     return architecture in PASS_LOSS_ARCHITECTURES
 
 
+def supports_fixed_point_training(architecture: str) -> bool:
+    return architecture in PASS_LOSS_ARCHITECTURES
+
+
 def supports_append_recurrent(architecture: str) -> bool:
     return architecture in APPEND_RECURRENT_ARCHITECTURES
 

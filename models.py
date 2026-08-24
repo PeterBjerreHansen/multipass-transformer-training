@@ -21,8 +21,17 @@ class PassOutput:
 
 
 @dataclass(frozen=True)
+class PassHaltingStats:
+    pass_counts: torch.Tensor
+    converged: torch.Tensor
+    relative_linf_residual: torch.Tensor
+    logit_kl: torch.Tensor
+
+
+@dataclass(frozen=True)
 class MultiPassOutput:
     passes: tuple[PassOutput, ...]
+    halting: PassHaltingStats | None = None
 
     def __post_init__(self) -> None:
         if not self.passes:
@@ -281,6 +290,46 @@ def normalize_pass_weights(
     return result / total
 
 
+def relative_linf_residual_per_example(
+    previous: torch.Tensor,
+    current: torch.Tensor,
+    valid_positions: torch.Tensor,
+) -> torch.Tensor:
+    """Return a detached relative L-infinity memory residual per example."""
+    if previous.shape != current.shape or current.ndim != 3:
+        raise ValueError("states must have matching [B, T, D] shapes")
+    if valid_positions.shape != current.shape[:2]:
+        raise ValueError("valid_positions must have shape [B, T]")
+    valid = valid_positions.to(device=current.device, dtype=torch.bool).unsqueeze(-1)
+    if not valid.squeeze(-1).any(dim=1).all():
+        raise ValueError("each example must contain at least one valid position")
+    previous_float = previous.detach().float().masked_fill(~valid, 0.0)
+    current_float = current.detach().float().masked_fill(~valid, 0.0)
+    numerator = (current_float - previous_float).abs().amax(dim=(1, 2))
+    denominator = current_float.abs().amax(dim=(1, 2))
+    return numerator / (denominator + 1e-8)
+
+
+def logit_kl_per_example(
+    previous: torch.Tensor,
+    current: torch.Tensor,
+    valid_positions: torch.Tensor,
+) -> torch.Tensor:
+    """Return detached mean tokenwise KL(previous || current) per example."""
+    if previous.shape != current.shape or current.ndim != 3:
+        raise ValueError("logits must have matching [B, T, V] shapes")
+    if valid_positions.shape != current.shape[:2]:
+        raise ValueError("valid_positions must have shape [B, T]")
+    valid = valid_positions.to(device=current.device, dtype=torch.bool)
+    if not valid.any(dim=1).all():
+        raise ValueError("each example must contain at least one valid position")
+    previous_log = F.log_softmax(previous.detach().float(), dim=-1)
+    current_log = F.log_softmax(current.detach().float(), dim=-1)
+    token_kl = (previous_log.exp() * (previous_log - current_log)).sum(dim=-1)
+    value = (token_kl * valid).sum(dim=1) / valid.sum(dim=1)
+    return value.clamp_min(0.0)
+
+
 def _validate_sampling_args(temperature: float, top_k: int | None) -> None:
     if temperature < 0 or not math.isfinite(float(temperature)):
         raise ValueError("temperature must be finite and non-negative")
@@ -532,6 +581,132 @@ class MultiPassTransformer(nn.Module):
             if previous_memory is None:
                 raise RuntimeError("multi-pass model failed to emit memory states")
         return MultiPassOutput(tuple(outputs))
+
+    def forward_fixed_point(
+        self,
+        idx: torch.Tensor,
+        *,
+        min_passes: int,
+        max_passes: int,
+        memory_tolerance: float,
+        kl_tolerance: float,
+        memory_positions: torch.Tensor,
+        logit_positions: torch.Tensor,
+    ) -> MultiPassOutput:
+        """Run recurrence with detached, per-example fixed-point halting.
+
+        Halted examples keep their last tensors while the remaining active
+        sub-batch continues. The final pass therefore contains every example
+        at its own selected depth, with gradients through all executed passes.
+        """
+        if not 2 <= min_passes <= max_passes <= self.config.max_passes:
+            raise ValueError(
+                "pass limits must satisfy 2 <= min_passes <= max_passes <= configured max_passes"
+            )
+        for name, value in (
+            ("memory_tolerance", memory_tolerance),
+            ("kl_tolerance", kl_tolerance),
+        ):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if memory_positions.shape != idx.shape or logit_positions.shape != idx.shape:
+            raise ValueError("position masks must have the same [B, T] shape as idx")
+        memory_positions = memory_positions.to(device=idx.device, dtype=torch.bool)
+        logit_positions = logit_positions.to(device=idx.device, dtype=torch.bool)
+        if not memory_positions.any(dim=1).all() or not logit_positions.any(dim=1).all():
+            raise ValueError("each example must contain valid memory and logit positions")
+
+        token_stream = self.embed_tokens(idx)
+        batch_size = token_stream.shape[0]
+        active = torch.ones(batch_size, dtype=torch.bool, device=idx.device)
+        pass_counts = torch.zeros(batch_size, dtype=torch.long, device=idx.device)
+        converged = torch.zeros_like(active)
+        final_residual = torch.full(
+            (batch_size,),
+            float("inf"),
+            device=idx.device,
+            dtype=torch.float32,
+        )
+        final_kl = torch.full_like(final_residual, float("inf"))
+        outputs: list[PassOutput] = []
+        previous_memory: torch.Tensor | None = None
+        previous_logits: torch.Tensor | None = None
+        previous_hidden: torch.Tensor | None = None
+
+        for pass_index in range(1, max_passes + 1):
+            active_indices = active.nonzero(as_tuple=False).flatten()
+            active_tokens = token_stream.index_select(0, active_indices)
+            read_memory = None
+            active_memory = None
+            if previous_memory is not None:
+                active_memory = previous_memory.index_select(0, active_indices)
+                read_memory = shift_right(active_memory)
+            raw = self.forward_pass(active_tokens, read_memory)
+            if raw.memory_states is None:
+                raise RuntimeError("multi-pass model failed to emit memory states")
+
+            pass_counts = pass_counts + active.to(dtype=torch.long)
+            if previous_memory is None or previous_logits is None or previous_hidden is None:
+                current_memory = raw.memory_states
+                current_logits = raw.logits
+                current_hidden = raw.hidden_states
+            else:
+                current_memory = previous_memory.index_copy(
+                    0,
+                    active_indices,
+                    raw.memory_states,
+                )
+                current_logits = previous_logits.index_copy(0, active_indices, raw.logits)
+                current_hidden = previous_hidden.index_copy(
+                    0,
+                    active_indices,
+                    raw.hidden_states,
+                )
+                if active_memory is None:
+                    raise RuntimeError("active memory is missing after the first pass")
+                residual = relative_linf_residual_per_example(
+                    active_memory,
+                    raw.memory_states,
+                    memory_positions.index_select(0, active_indices),
+                )
+                logit_kl = logit_kl_per_example(
+                    previous_logits.index_select(0, active_indices),
+                    raw.logits,
+                    logit_positions.index_select(0, active_indices),
+                )
+                final_residual = final_residual.index_copy(0, active_indices, residual)
+                final_kl = final_kl.index_copy(0, active_indices, logit_kl)
+
+                if pass_index >= min_passes:
+                    newly_converged = (residual <= memory_tolerance) & (
+                        logit_kl <= kl_tolerance
+                    )
+                    converged_indices = active_indices[newly_converged]
+                    converged = converged.index_fill(0, converged_indices, True)
+                    active = active.index_fill(0, converged_indices, False)
+
+            outputs.append(
+                PassOutput(
+                    logits=current_logits,
+                    hidden_states=current_hidden,
+                    memory_states=current_memory,
+                )
+            )
+            previous_memory = current_memory
+            previous_logits = current_logits
+            previous_hidden = current_hidden
+            if not bool(active.any().item()):
+                break
+
+        return MultiPassOutput(
+            tuple(outputs),
+            halting=PassHaltingStats(
+                pass_counts=pass_counts.detach(),
+                converged=converged.detach(),
+                relative_linf_residual=final_residual.detach(),
+                logit_kl=final_kl.detach(),
+            ),
+        )
 
     @staticmethod
     def calc_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:

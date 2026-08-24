@@ -355,6 +355,34 @@ This is the $\lambda=1$ weighting from the FBT objective. The final schedule
 also retains the paper's small three-pass tail, which was important for
 long-horizon stability. Evaluation always uses `--max-passes`.
 
+Fixed-point training is available for `memory_tape`, `memory_add`, and
+`latent_feedback`:
+
+```bash
+uv run python -m experiments.train_bbh \
+  --preset permutation_main \
+  --architecture latent_feedback \
+  --train-pass-mode fixed_point \
+  --min-passes 2 \
+  --max-passes 6 \
+  --fixed-point-memory-tol 0.1 \
+  --fixed-point-kl-tol 1e-3
+```
+
+After the minimum depth, each example stops when both its relative
+L-infinity memory change and consecutive-pass logit KL are within tolerance.
+The memory check covers real, non-padding token positions; the KL check covers
+supervised target positions. Halting decisions are detached, but gradients
+flow through every pass that an example executes. Training gives equal weight
+to the first-pass loss and the final adaptive-pass loss. A probabilistic
+`--train-pass-schedule` cannot be combined with this mode.
+
+Evaluation and generation remain fixed at `--max-passes`; fixed-point training
+does not silently change deployment behavior. Metrics log mean executed
+passes, convergence rate, the pass-count histogram, and final residual/KL
+summaries. Active-sub-batch shrinking reduces arithmetic, though it may not
+improve wall-clock time on every accelerator or compiled execution path.
+
 Sandwich depth loop:
 
 ```bash
