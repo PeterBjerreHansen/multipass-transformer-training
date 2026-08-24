@@ -11,7 +11,7 @@ pytest -q
 
 python -m experiments.train_trace \
   --preset shortest_path_smoke \
-  --architecture memory_tape \
+  --architecture memory_attention \
   --device cpu \
   --run-dir "${CPU_RUN}"
 
@@ -44,7 +44,7 @@ python -m experiments.diagnose_memory \
 if python -c 'import torch; raise SystemExit(0 if torch.backends.mps.is_available() else 1)'; then
   python -m experiments.train_trace \
     --preset shortest_path_smoke \
-    --architecture memory_tape \
+    --architecture memory_attention \
     --device mps \
     --run-dir "${RESULT_ROOT}/mps"
 fi

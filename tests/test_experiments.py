@@ -37,7 +37,7 @@ from experiments.train_trace import (
 from models import (
     MemoryAddTransformer,
     MultiPassConfig,
-    MemoryTapeTransformer,
+    MemoryAttentionTransformer,
 )
 from tasks.bbh import pointer_chasing
 from tasks.trace import maze, othello, shortest_path
@@ -50,7 +50,7 @@ from tasks.trace.registry import TRACE_TASKS
 
 def _args() -> SimpleNamespace:
     return SimpleNamespace(
-        architecture="memory_tape",
+        architecture="memory_attention",
         inference_mode="recompute",
         token_selection="sample",
         pass_loss_weights_by_k={3: [0, 0, 1]},
@@ -96,7 +96,7 @@ def test_training_presets_default_to_global_gradient_clipping(parser):
 
 def test_evaluation_sampling_is_repeatable_and_does_not_change_global_rng():
     args = _args()
-    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryAttentionTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(2, 5, 2, stoi, device="cpu", rng=random.Random(2))
     before = torch.get_rng_state().clone()
@@ -112,7 +112,7 @@ def test_evaluation_sampling_is_repeatable_and_does_not_change_global_rng():
 
 def test_evaluation_aggregates_conditional_metrics_by_example_count():
     args = _args()
-    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryAttentionTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(
         2,
@@ -152,7 +152,7 @@ def test_evaluation_aggregates_conditional_metrics_by_example_count():
 
 
 def test_memory_interventions_pass_dynamics_and_schedule_gap_return_finite_values():
-    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryAttentionTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(2, 5, 2, stoi, device="cpu", rng=random.Random(2))
     full_output = model(batch.idx)
@@ -200,7 +200,7 @@ def test_relative_linf_residual_is_per_example_and_ignores_padding():
     assert residual["max"] == pytest.approx(1.0)
 
 
-def test_relative_linf_residual_is_zero_for_identical_tapes():
+def test_relative_linf_residual_is_zero_for_identical_memory_states():
     memory = torch.randn(2, 3, 4)
     residual = _relative_linf_residual(
         memory,
@@ -244,7 +244,7 @@ def test_memory_add_diagnostics_return_finite_values():
 
 
 def test_gradient_norms_cover_memory_subsystems_after_backward():
-    model = MemoryTapeTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
+    model = MemoryAttentionTransformer(MultiPassConfig(24, 12, 1, 1, 8, 3))
     _vocab, stoi, _ = pointer_chasing.build_pointer_chasing_vocab(5)
     batch = pointer_chasing.build_pointer_chasing_batch(2, 5, 2, stoi, device="cpu", rng=random.Random(2))
     output = model(batch.idx)
@@ -285,7 +285,7 @@ def _one_step(model, optimizer, tokens, targets):
 def test_checkpoint_resume_reproduces_next_optimizer_step(tmp_path):
     torch.manual_seed(101)
     config = MultiPassConfig(8, 13, 1, 1, 8, 3)
-    model = MemoryTapeTransformer(config)
+    model = MemoryAttentionTransformer(config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     gen = torch.Generator().manual_seed(55)
     batch1 = torch.randint(0, 13, (2, 6), generator=gen)
@@ -309,7 +309,7 @@ def test_checkpoint_resume_reproduces_next_optimizer_step(tmp_path):
     expected = {name: value.detach().clone() for name, value in model.state_dict().items()}
 
     torch.manual_seed(999)
-    restored_model = MemoryTapeTransformer(config)
+    restored_model = MemoryAttentionTransformer(config)
     restored_optimizer = torch.optim.AdamW(restored_model.parameters(), lr=1e-3)
     checkpoint = load_checkpoint_payload(tmp_path / "latest.pt", device="cpu")
     restore_checkpoint_state(checkpoint, model=restored_model, optimizer=restored_optimizer, device="cpu")
@@ -341,7 +341,7 @@ def test_warmup_cosine_learning_rate_uses_absolute_steps():
 
 def test_run_directory_cannot_be_reused_without_resume(tmp_path):
     run_dir = tmp_path / "run"
-    model = MemoryTapeTransformer(MultiPassConfig(8, 13, 1, 1, 8, 3))
+    model = MemoryAttentionTransformer(MultiPassConfig(8, 13, 1, 1, 8, 3))
     args = SimpleNamespace(run_dir=str(run_dir), resume_from=None)
     prepare_run_artifacts(args, model=model, default_root_parts=("test",))
 
@@ -355,7 +355,7 @@ def test_run_directory_cannot_be_reused_without_resume(tmp_path):
 
 def test_resume_preserves_original_run_configuration(tmp_path):
     run_dir = tmp_path / "run"
-    model = MemoryTapeTransformer(MultiPassConfig(8, 13, 1, 1, 8, 3))
+    model = MemoryAttentionTransformer(MultiPassConfig(8, 13, 1, 1, 8, 3))
     prepare_run_artifacts(
         SimpleNamespace(run_dir=str(run_dir), resume_from=None, marker="original"),
         model=model,
@@ -378,12 +378,12 @@ def test_resume_preserves_original_run_configuration(tmp_path):
 def test_cli_has_only_two_inference_modes_and_no_cache_source():
     args = parse_bbh_args([
         "--preset", "pointer_chasing_smoke",
-        "--architecture", "memory_tape",
+        "--architecture", "memory_attention",
         "--inference-mode", "append_recurrent",
     ])
     assert args.inference_mode == "append_recurrent"
     assert not hasattr(args, "cache_source")
-    assert not hasattr(args, "memory_tape_gate")
+    assert not hasattr(args, "memory_attention_gate")
 
 
 def test_shortest_path_cli_selects_compiled_datasets_without_distribution_knob():

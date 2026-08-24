@@ -8,7 +8,7 @@ source "${ROOT}/scripts/lib/maze_matrix.sh"
 # Hold topology, route policy, seeds, and optimizer fixed while varying the
 # prompt and target representation. Override ARCHITECTURES after the baseline
 # identifies the architectures worth carrying into this larger matrix.
-ARCHITECTURES="${ARCHITECTURES:-transformer memory_tape}"
+ARCHITECTURES="${ARCHITECTURES:-transformer memory_attention}"
 for representation in \
   "sparse-cells cell-path" \
   "dense-cells cell-path" \

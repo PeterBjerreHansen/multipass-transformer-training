@@ -147,11 +147,11 @@ def validate_model_args(args) -> None:
 
     memory_width = getattr(args, "memory_width", None)
     memory_read_layers = getattr(args, "memory_read_layers", None)
-    if args.architecture != "memory_tape" and (
+    if args.architecture != "memory_attention" and (
         memory_width is not None or memory_read_layers is not None
     ):
         raise ValueError(
-            "--memory-width and --memory-read-layers require --architecture memory_tape"
+            "--memory-width and --memory-read-layers require --architecture memory_attention"
         )
 
     train_pass_mode = getattr(args, "train_pass_mode", "fixed")

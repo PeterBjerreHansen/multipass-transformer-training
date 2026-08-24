@@ -32,12 +32,12 @@ def test_bbh_training_cli_writes_restorable_checkpoint(tmp_path):
     result = _run(
         "-m", "experiments.train_bbh",
         "--preset", "pointer_chasing_smoke",
-        "--architecture", "memory_tape",
+        "--architecture", "memory_attention",
         "--curriculum-threshold", "0",
         "--device", "cpu",
         "--run-dir", str(run_dir),
     )
-    assert "architecture: memory_tape" in result.stdout
+    assert "architecture: memory_attention" in result.stdout
     assert (run_dir / "latest.pt").exists()
     assert (run_dir / "best.pt").exists()
     assert (run_dir / "config.json").exists()
@@ -93,7 +93,7 @@ def test_trace_training_evaluation_and_diagnostics_cli(tmp_path):
     _run(
         "-m", "experiments.train_trace",
         "--preset", "shortest_path_smoke",
-        "--architecture", "memory_tape",
+        "--architecture", "memory_attention",
         "--device", "cpu",
         "--run-dir", str(run_dir),
     )
@@ -154,7 +154,7 @@ def test_othello_random_prefix_evaluation_cli(tmp_path):
     _run(
         "-m", "experiments.train_trace",
         "--preset", "othello_smoke",
-        "--architecture", "memory_tape",
+        "--architecture", "memory_attention",
         "--othello-data-dir", str(data_dir),
         "--othello-train-games", "8",
         "--othello-val-games", "4",
@@ -196,7 +196,7 @@ def test_maze_training_and_solver_based_evaluation_cli(tmp_path):
     result = _run(
         "-m", "experiments.train_trace",
         "--preset", "maze_smoke",
-        "--architecture", "memory_tape",
+        "--architecture", "memory_attention",
         "--device", "cpu",
         "--run-dir", str(run_dir),
     )
@@ -241,7 +241,7 @@ def test_shortest_path_training_resume_evaluation_and_diagnostics_cli(
     result = _run(
         "-m", "experiments.train_trace",
         "--preset", "shortest_path_smoke",
-        "--architecture", "memory_tape",
+        "--architecture", "memory_attention",
         "--device", "cpu",
         "--run-dir", str(run_dir),
     )

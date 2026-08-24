@@ -21,7 +21,7 @@ Transformers often struggle with algorithmic state tracking (see, for example, [
 
 ![Curriculum frontier for S5 permutation tracking](figures/s5_permutation_fig.png "S₅ permutation tracking")
 
-In my implementation models predict only the final state and the number of swaps is increased once validation accuracy exceeds 95%. For these experiments, the baseline transformer and multi-pass models use the `small` preset: 4 layers, 4 attention heads, and 128 embedding dimensions. The baseline is intentionally depth-constrained, while the multi-pass models can reuse a shifted memory tape across recurrent passes. The baseline's learned number of state changes therefore flattens in a way that multi-pass training alleviates.
+In my implementation models predict only the final state and the number of swaps is increased once validation accuracy exceeds 95%. For these experiments, the baseline transformer and multi-pass models use the `small` preset: 4 layers, 4 attention heads, and 128 embedding dimensions. The baseline is intentionally depth-constrained, while the multi-pass models can reuse a shifted memory state across recurrent passes. The baseline's learned number of state changes therefore flattens in a way that multi-pass training alleviates.
 
 ## A Theoretical Motivation
 
@@ -35,13 +35,13 @@ The tempting 'fix' would be to let the hidden state $h_{i}^{l}$ at token $i$ dep
 
 ![](figures/generation_fig.png "Generation")
 
-But here is an idea: what if we run multiple sequential passes over the same teacher-forced sequence instead of making token $i$ wait for token $i-1$ during training? Token positions remain parallel within each pass, while the passes themselves form a recurrence. Pass 1 writes a memory tape. Pass 2 reads a shifted version of that tape. Pass 3 can read the shifted tape from pass 2, and so on. The hope is that such multi-pass training can teach the model to emit memories that are useful and stable enough to support cheaper recurrent-style memory use at inference time.
+But here is an idea: what if we run multiple sequential passes over the same teacher-forced sequence instead of making token $i$ wait for token $i-1$ during training? Token positions remain parallel within each pass, while the passes themselves form a recurrence. Pass 1 writes a memory state. Pass 2 reads a shifted version of that memory. Pass 3 can read the shifted memory from pass 2, and so on. The hope is that such multi-pass training can teach the model to emit memories that are useful and stable enough to support cheaper recurrent-style memory use at inference time.
 
 ### Mathematical Setup
 
 The goal is to train the model to read and write a memory state for each token, and then test whether those memories can be reused during generation. There are many possible memory designs. This project focuses on one memory vector per token per pass.
 
-For a token sequence $T = [t_0, \ldots, t_{n-1}]$, let $M^{(k)}$ be the length $n$ memory tape written after pass $k$. The all-zero tape is the initial state $M^{(0)} = 0$, and the multi-pass recurrence is:
+For a token sequence $T = [t_0, \ldots, t_{n-1}]$, let $M^{(k)}$ be the length $n$ memory state written after pass $k$. The all-zero memory is the initial state $M^{(0)} = 0$, and the multi-pass recurrence is:
 
 ```math
 (L^{(k)}, M^{(k)})
@@ -83,9 +83,9 @@ Most experiments put the heaviest weight on the final pass. The final pass is th
 
 The training schema:
 
-1. pass `k` reads the shifted memory tape written by pass `k - 1`
+1. pass `k` reads the shifted memory state written by pass `k - 1`
 2. pass `k` predicts the same next-token targets as the other passes
-3. pass `k` writes a new memory tape for pass `k + 1`
+3. pass `k` writes a new memory state for pass `k + 1`
 
 is exact with respect to this `K`-pass model. No approximation has been introduced yet.
 
@@ -94,7 +94,7 @@ is exact with respect to this `K`-pass model. No approximation has been introduc
 And how do we get stateful inference out of this? Well, the exact inference procedure for this model is expensive. For every new token, we can run all $K$ passes on the full current prefix. That exact `recompute` procedure preserves the same pass-by-pass recurrence used in training, but it is too expensive for the target inference mode. What we want is append-recurrent inference:
 
 1. Run the prompt exactly for $K$ passes.
-2. Cache the final prompt memory tape $M_{\mathrm{prompt}}^{(K)}$.
+2. Cache the final prompt memory state $M_{\mathrm{prompt}}^{(K)}$.
 3. Generate the first token from the final prompt logits.
 4. Run one pass over the extended prefix using the persistent memory cache.
 5. Append only the memory written for the newest token.
@@ -102,17 +102,17 @@ And how do we get stateful inference out of this? Well, the exact inference proc
 
 ![](figures/mismatch_fig.png "Training and generation mismatch")
 
-The first generated token is special. After the $K$ prompt passes, the model already has both the final logits for predicting the next token and the final prompt tape $M_{\mathrm{prompt}}^{(K)}$. So no extra recurrent pass is needed to sample the first token. Once $t_{n+1}$ has been generated, the model runs one pass over the extended prefix while reading the persistent prompt tape. It keeps the old entries fixed and appends the newly written memory for the generated token:
+The first generated token is special. After the $K$ prompt passes, the model already has both the final logits for predicting the next token and the final prompt memory $M_{\mathrm{prompt}}^{(K)}$. So no extra recurrent pass is needed to sample the first token. Once $t_{n+1}$ has been generated, the model runs one pass over the extended prefix while reading the persistent prompt memory. It keeps the old entries fixed and appends the newly written memory for the generated token:
 
 ```math
 \mathrm{Append}\left(M_{\mathrm{prompt}}^{(K)}, \widetilde M_{\mathrm{new}}\right)
 ```
 
-The next generated token is then produced from a tape containing both final-pass prompt memories and a memory written by the online recurrent procedure. Each following step appends one more such memory. That is the approximation. Exact recomputation would rerun all $K$ passes on the longer prefix. Causality means that the prompt positions would be reconstructed identically, but the new position would be processed through the full sequence of $K$ pass updates. Append-recurrent inference reuses the final prompt tape and gives the new position only one online recurrent update before appending its memory. The project therefore depends on a stability question:
+The next generated token is then produced from a memory containing both final-pass prompt memories and a memory written by the online recurrent procedure. Each following step appends one more such memory. That is the approximation. Exact recomputation would rerun all $K$ passes on the longer prefix. Causality means that the prompt positions would be reconstructed identically, but the new position would be processed through the full sequence of $K$ pass updates. Append-recurrent inference reuses the final prompt memory and gives the new position only one online recurrent update before appending its memory. The project therefore depends on a stability question:
 
 > Does multi-pass training produce final-pass memories that remain useful when they are frozen and extended recurrently with newly generated memories?
 
-If yes, generation can pay for the $K$-pass computation once on the prompt and then continue with one pass per generated token. If no, the recurrent tape drifts away from the finite-pass model. The real empirical question is the gap between `recompute` and `append_recurrent` generation, especially as the generated suffix becomes longer.
+If yes, generation can pay for the $K$-pass computation once on the prompt and then continue with one pass per generated token. If no, the recurrent memory drifts away from the finite-pass model. The real empirical question is the gap between `recompute` and `append_recurrent` generation, especially as the generated suffix becomes longer.
 
 ## Experiments
 
@@ -135,13 +135,13 @@ training and inference methods implemented by `MultiPassTransformer`. A
 separate sandwich depth loop is included below, but it deliberately does not
 pretend to support the aligned append-recurrent memory contract.
 
-The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full tape written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the tape read at the next pass. The shared wrapper controls recurrence and shifts the previous tape. Each model owns one complete pass, including its final normalization, language-model head, and memory write.
+The notation in this section is tensor-level: $X$ is the token-embedding stream, $M^{(k)}$ is the full memory written at pass $k$, and $R = \mathrm{Shift}(M^{(k-1)})$ is the memory read at the next pass. The shared wrapper controls recurrence and shifts the previous memory. Each model owns one complete pass, including its final normalization, language-model head, and memory write.
 
-### Memory Through Attention: The MemoryTape Architecture
+### Memory Through Attention: The MemoryAttention Architecture
 
-MemoryTape retains an ordinary causal token decoder. Its decoder is:
+MemoryAttention retains an ordinary causal token decoder. Its decoder is:
 
-> **MemoryTape decoder**
+> **MemoryAttention decoder**
 >
 > $`H = X`$<br>
 > $`\textbf{for each decoder block:}`$<br>
@@ -149,7 +149,7 @@ MemoryTape retains an ordinary causal token decoder. Its decoder is:
 > &nbsp;&nbsp; $`H = H + \mathrm{CausalCrossAttention}\left(Q=\mathrm{LN}_{q}(H),\ KV=\mathrm{LN}_{kv}(R)\right)`$<br>
 > &nbsp;&nbsp; $`H = H + \mathrm{MLP}(\mathrm{LN}_{\mathrm{mlp}}(H))`$<br>
 
-Causal cross-attention is applied over $R$ as a separately addressable key/value source; the tape is not concatenated with the token stream. Its inclusive causal mask permits query position $t$ to read tape slots $s\leq t$. Because $R_s=M_{s-1}$, this is strict causality with respect to the unshifted tape: only memories from original positions before $t$ are readable. The reader is an ordinary residual branch with no learned gate. On pass one, $R=0$, so the cross-attention contribution is exactly zero and the model begins as a causal token decoder.
+Causal cross-attention is applied over $R$ as a separately addressable key/value source; the memory is not concatenated with the token stream. Its inclusive causal mask permits query position $t$ to read memory slots $s\leq t$. Because $R_s=M_{s-1}$, this is strict causality with respect to the unshifted memory: only memories from original positions before $t$ are readable. The reader is an ordinary residual branch with no learned gate. On pass one, $R=0$, so the cross-attention contribution is exactly zero and the model begins as a causal token decoder.
 
 By default, every decoder block reads a memory vector of width `n_embd`, which
 preserves the historical implementation. Two small levers cover the useful
@@ -165,7 +165,7 @@ parameters and compute rather than merely masking unused modules.
 
 ### Residual Memory Fusion: The MemoryAdd Architecture
 
-MemoryAdd keeps the ordinary token stream intact and learns a residual correction from the shifted recurrent tape:
+MemoryAdd keeps the ordinary token stream intact and learns a residual correction from the shifted recurrent memory:
 
 > **MemoryAdd decoder**
 >
@@ -178,7 +178,7 @@ MemoryAdd keeps the ordinary token stream intact and learns a residual correctio
 LatentFeedback implements the asymmetric GLU transition from
 [Wang et al., *Full-bandwidth transformer*, Section 3.1](https://arxiv.org/html/2608.08888#S3.SS1).
 The previous top-layer state supplies the value path. The token embedding
-controls the sigmoid gate. During parallel training, the shifted tape $R$
+controls the sigmoid gate. During parallel training, the shifted memory $R$
 supplies the previous state.
 
 > **LatentFeedback decoder**
@@ -193,7 +193,7 @@ supplies the previous state.
 > $`M^{(k)}=H`$
 
 Position zero has no earlier memory, so it retains its token embedding. The
-decoder writes its final top-layer state to the next memory tape. This
+decoder writes its final top-layer state to the next memory state. This
 implementation uses the repository's LayerNorm, pass-loss controls, and
 append-recurrent inference contract. It does not reproduce the paper's full
 model or training setup.
@@ -212,7 +212,7 @@ once as a coda:
 
 It is a small weight-tied depth-loop reference inspired by the
 `sandwiched-recurrence` branch. It is not Mozer et al.'s token-step
-Recirculation: it recurs only in depth, has no shifted memory tape, and supports
+Recirculation: it recurs only in depth, has no shifted memory state, and supports
 only `recompute` generation. A pass schedule may vary its core iterations, but
 only the final coda output receives language-model loss.
 
@@ -227,7 +227,7 @@ Task generators and task-specific metrics live under `tasks/`. See [tasks/README
 
 ## Running experiments
 
-`main` supports `transformer`, `memory_tape`, `memory_add`, `latent_feedback`,
+`main` supports `transformer`, `memory_attention`, `memory_add`, `latent_feedback`,
 and `sandwich_loop`. The canonical launchers keep the original four-model
 aligned-memory comparison by default; `sandwich_loop` is opt-in because it has
 a different compute and inference contract. This is a controlled architecture
@@ -244,7 +244,7 @@ Use environment variables to select tasks, architectures, seeds, the device, and
 ```bash
 DEVICE=mps \
 TASKS=shortest_path \
-ARCHITECTURES="transformer memory_tape memory_add latent_feedback" \
+ARCHITECTURES="transformer memory_attention memory_add latent_feedback" \
 SEEDS="1337 2027 4099" \
 RESULT_ROOT=results/trace \
 bash scripts/trace/run.sh
@@ -259,7 +259,7 @@ Use `tests/test_smoke.sh` for a quick end-to-end check. Use `tests/test_shortest
 Evaluate a trained trace run with its task-specific metrics:
 
 ```bash
-RUN_DIR=results/trace/shortest_path/main/memory_tape/seed_1337 \
+RUN_DIR=results/trace/shortest_path/main/memory_attention/seed_1337 \
 DEVICE=mps \
 bash scripts/trace/eval.sh
 ```
@@ -270,7 +270,7 @@ Run memory-use and pass-dynamics diagnostics separately:
 
 ```bash
 uv run python -m experiments.diagnose_memory \
-  --input-run-dir results/trace/shortest_path/main/memory_tape/seed_1337 \
+  --input-run-dir results/trace/shortest_path/main/memory_attention/seed_1337 \
   --extra-passes 6 \
   --schedule-gap-horizon 16
 ```
@@ -304,20 +304,20 @@ uv run python -m experiments.train_bbh \
   --architecture transformer
 ```
 
-MemoryTape:
+MemoryAttention:
 
 ```bash
 uv run python -m experiments.train_bbh \
   --preset permutation_main \
-  --architecture memory_tape
+  --architecture memory_attention
 ```
 
-MemoryTape with two readers and a narrow memory vector:
+MemoryAttention with two readers and a narrow memory vector:
 
 ```bash
 uv run python -m experiments.train_bbh \
   --preset permutation_main \
-  --architecture memory_tape \
+  --architecture memory_attention \
   --memory-read-layers 1 3 \
   --memory-width 64
 ```
@@ -336,13 +336,13 @@ is an optional backbone-level replacement:
 ```bash
 uv run python -m experiments.train_bbh \
   --preset permutation_main \
-  --architecture memory_tape \
+  --architecture memory_attention \
   --position-encoding rope \
   --rope-theta 10000
 ```
 
 RoPE rotates causal self-attention queries and keys in every architecture and
-requires an even attention-head dimension. MemoryTape cross-attention remains
+requires an even attention-head dimension. MemoryAttention cross-attention remains
 content-addressed without RoPE; assigning positions to its shifted memory keys
 is intentionally left as a separate ablation.
 
@@ -369,7 +369,7 @@ uses `[1]`, K=2 uses `[0.5, 0.5]`, and K=3 uses
 and splits the other half across the feedback passes. This is the $\lambda=1$
 weighting from the FBT objective. Evaluation always uses `--max-passes`.
 
-Fixed-point training is available for `memory_tape`, `memory_add`, and
+Fixed-point training is available for `memory_attention`, `memory_add`, and
 `latent_feedback`:
 
 ```bash

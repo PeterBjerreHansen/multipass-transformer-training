@@ -118,8 +118,8 @@ class MultiPassConfig(TransformerConfig):
 
 
 @dataclass
-class MemoryTapeConfig(MultiPassConfig):
-    """MemoryTape-specific reader placement and memory-vector width."""
+class MemoryAttentionConfig(MultiPassConfig):
+    """MemoryAttention-specific reader placement and memory-vector width."""
 
     memory_width: int | None = None
     memory_read_layers: tuple[int, ...] | None = None
@@ -255,7 +255,7 @@ class Block(nn.Module):
 
 
 class CausalCrossAttention(nn.Module):
-    """Causal cross-attention into an already right-shifted memory tape."""
+    """Causal cross-attention into an already right-shifted memory state."""
 
     def __init__(self, config: TransformerConfig, *, memory_dim: int | None = None):
         super().__init__()
@@ -998,12 +998,12 @@ class MemoryBlock(nn.Module):
         return x
 
 
-class MemoryTapeTransformer(MultiPassTransformer):
+class MemoryAttentionTransformer(MultiPassTransformer):
     block_cls = MemoryBlock
 
     def build_blocks(self, config: MultiPassConfig) -> nn.ModuleList:
-        if not isinstance(config, MemoryTapeConfig):
-            raise TypeError("MemoryTapeTransformer requires MemoryTapeConfig")
+        if not isinstance(config, MemoryAttentionConfig):
+            raise TypeError("MemoryAttentionTransformer requires MemoryAttentionConfig")
         enabled = (
             set(range(config.n_layer))
             if config.memory_read_layers is None
@@ -1017,8 +1017,8 @@ class MemoryTapeTransformer(MultiPassTransformer):
         )
 
     def __init__(self, config: MultiPassConfig):
-        if not isinstance(config, MemoryTapeConfig):
-            config = MemoryTapeConfig(**config.to_dict())
+        if not isinstance(config, MemoryAttentionConfig):
+            config = MemoryAttentionConfig(**config.to_dict())
         super().__init__(config)
         self.ln_mem = LayerNorm(config.n_embd)
         self.mem_head = nn.Linear(config.n_embd, self.memory_dim, bias=False)
@@ -1027,8 +1027,8 @@ class MemoryTapeTransformer(MultiPassTransformer):
     @property
     def memory_dim(self) -> int:
         config = self.config
-        if not isinstance(config, MemoryTapeConfig):
-            raise TypeError("MemoryTapeTransformer requires MemoryTapeConfig")
+        if not isinstance(config, MemoryAttentionConfig):
+            raise TypeError("MemoryAttentionTransformer requires MemoryAttentionConfig")
         return config.memory_width or config.n_embd
 
     @property

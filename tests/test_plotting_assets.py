@@ -123,7 +123,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
             {
                 "args": {
                     "task": "shortest_path",
-                    "architecture": "memory_tape",
+                    "architecture": "memory_attention",
                     "preset": "shortest_path_main",
                     "seed": 1337,
                     "device": "cpu",
@@ -163,7 +163,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
             {
                 "input_run_dir": str(run_dir),
                 "task": "shortest_path",
-                "architecture": "memory_tape",
+                "architecture": "memory_attention",
                 "inference_mode": "append_recurrent",
                 "effective_inference_mode": "append_recurrent",
                 "evaluation_examples": 16,
@@ -179,7 +179,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
     diagnostics = {
         "input_run_dir": str(run_dir),
         "task": "shortest_path",
-        "architecture": "memory_tape",
+        "architecture": "memory_attention",
         "memory_interventions": {
             "loss_deltas": {"correct": 0.0, "zero_memory_bank": 0.2}
         },
@@ -262,7 +262,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
         {
             "run_dir": "run-a",
             "task": "pointer_chasing",
-            "architecture": "memory_tape",
+            "architecture": "memory_attention",
             "seed": 1337,
             "device": "cpu",
             "max_level": 4,
@@ -274,7 +274,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
         {
             "run_dir": "run-a",
             "task": "pointer_chasing",
-            "architecture": "memory_tape",
+            "architecture": "memory_attention",
             "seed": 1337,
             "device": "cpu",
             "max_level": 4,
@@ -286,7 +286,7 @@ def test_plotting_loaders_follow_current_artifact_schemas(tmp_path):
         {
             "run_dir": "run-a",
             "task": "pointer_chasing",
-            "architecture": "memory_tape",
+            "architecture": "memory_attention",
             "seed": 1337,
             "device": "cpu",
             "max_level": 4,

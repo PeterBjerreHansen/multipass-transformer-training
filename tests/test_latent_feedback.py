@@ -192,7 +192,7 @@ def test_pass_mixture_supports_every_pass_override_architecture():
     )
     assert build_pass_mixture(args, seed=1) is not None
 
-    args.architecture = "memory_tape"
+    args.architecture = "memory_attention"
     assert build_pass_mixture(args, seed=1) is not None
     args.architecture = "sandwich_loop"
     assert build_pass_mixture(args, seed=1) is not None
@@ -355,10 +355,10 @@ def test_both_training_clis_parse_rope_options():
         assert args.rope_theta == pytest.approx(500_000.0)
 
 
-def test_both_training_clis_parse_memory_tape_levers():
+def test_both_training_clis_parse_memory_attention_levers():
     options = [
         "--architecture",
-        "memory_tape",
+        "memory_attention",
         "--memory-width",
         "8",
         "--memory-read-layers",

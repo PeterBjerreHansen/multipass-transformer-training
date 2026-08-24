@@ -7,7 +7,7 @@ cd "${ROOT}"
 RESULT_ROOT="$(mktemp -d /tmp/mpt-smoke.XXXXXX)"
 trap 'rm -rf "${RESULT_ROOT}"' EXIT
 
-for ARCH in memory_tape memory_add latent_feedback; do
+for ARCH in memory_attention memory_add latent_feedback; do
   python -m experiments.train_bbh \
     --preset pointer_chasing_smoke \
     --architecture "${ARCH}" \

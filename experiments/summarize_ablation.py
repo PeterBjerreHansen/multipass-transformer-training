@@ -192,12 +192,12 @@ def recommend(
     train_ratio = _median_ratio(control, treatment, "train.train_tok_per_s")
     eval_ratio = _median_ratio(control, treatment, "drift.append_recurrent.eval_output_tok_per_s")
     parameter_ratio = _median_ratio(control, treatment, "model.non_embedding_parameters")
-    tape_ratio = _median_ratio(control, treatment, "model_config.memory_bytes_per_token")
+    memory_ratio = _median_ratio(control, treatment, "model_config.memory_bytes_per_token")
     efficiency_win = bool(
         (train_ratio is not None and train_ratio >= 1.0 + THROUGHPUT_WIN)
         or (eval_ratio is not None and eval_ratio >= 1.0 + THROUGHPUT_WIN)
         or (parameter_ratio is not None and parameter_ratio <= 1.0 - SIZE_WIN)
-        or (tape_ratio is not None and tape_ratio <= 1.0 - SIZE_WIN)
+        or (memory_ratio is not None and memory_ratio <= 1.0 - SIZE_WIN)
     )
 
     eligible = quality_win if mode == "quality-only" else quality_win or (noninferior and efficiency_win)
@@ -213,7 +213,7 @@ def recommend(
         "median_train_throughput_ratio": train_ratio,
         "median_append_eval_throughput_ratio": eval_ratio,
         "median_parameter_ratio": parameter_ratio,
-        "median_tape_bytes_ratio": tape_ratio,
+        "median_memory_bytes_ratio": memory_ratio,
     }
 
 

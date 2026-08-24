@@ -4,8 +4,8 @@ from models import (
     CausalTransformer,
     LatentFeedbackTransformer,
     MemoryAddTransformer,
-    MemoryTapeConfig,
-    MemoryTapeTransformer,
+    MemoryAttentionConfig,
+    MemoryAttentionTransformer,
     MultiPassConfig,
     SandwichLoopTransformer,
     TransformerConfig,
@@ -13,7 +13,7 @@ from models import (
 
 ARCHITECTURES = (
     "transformer",
-    "memory_tape",
+    "memory_attention",
     "memory_add",
     "latent_feedback",
     "sandwich_loop",
@@ -21,7 +21,7 @@ ARCHITECTURES = (
 
 
 PASS_LOSS_ARCHITECTURES = frozenset(
-    {"memory_tape", "memory_add", "latent_feedback"}
+    {"memory_attention", "memory_add", "latent_feedback"}
 )
 PASS_OVERRIDE_ARCHITECTURES = PASS_LOSS_ARCHITECTURES | {"sandwich_loop"}
 APPEND_RECURRENT_ARCHITECTURES = PASS_LOSS_ARCHITECTURES
@@ -66,9 +66,9 @@ def build_model(args, vocab_size: int, block_size: int, device: str):
 
     if args.architecture == "transformer":
         model = CausalTransformer(TransformerConfig(**common))
-    elif args.architecture == "memory_tape":
-        model = MemoryTapeTransformer(
-            MemoryTapeConfig(
+    elif args.architecture == "memory_attention":
+        model = MemoryAttentionTransformer(
+            MemoryAttentionConfig(
                 **common,
                 max_passes=args.max_passes,
                 memory_width=getattr(args, "memory_width", None),

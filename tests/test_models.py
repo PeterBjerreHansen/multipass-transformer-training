@@ -20,8 +20,8 @@ from models import (
     LayerNorm,
     MemoryAddTransformer,
     MemoryBlock,
-    MemoryTapeConfig,
-    MemoryTapeTransformer,
+    MemoryAttentionConfig,
+    MemoryAttentionTransformer,
     MultiPassConfig,
     PassOutput,
     SandwichLoopTransformer,
@@ -34,9 +34,9 @@ from models import (
 )
 
 
-def tiny_memory_model(*, block_size: int = 12, max_passes: int = 3) -> MemoryTapeTransformer:
+def tiny_memory_model(*, block_size: int = 12, max_passes: int = 3) -> MemoryAttentionTransformer:
     torch.manual_seed(7)
-    return MemoryTapeTransformer(
+    return MemoryAttentionTransformer(
         MultiPassConfig(
             block_size=block_size,
             vocab_size=19,
@@ -217,7 +217,7 @@ def test_memory_block_has_no_first_pass_intercept():
     assert torch.equal(actual, expected)
 
 
-def test_memory_tape_uses_standard_memory_normalization_and_writer():
+def test_memory_attention_uses_standard_memory_normalization_and_writer():
     model = tiny_memory_model()
     assert isinstance(model.transformer.h[0].ln_mem_kv, LayerNorm)
     tokens = torch.randint(0, 19, (2, 6))
@@ -225,9 +225,9 @@ def test_memory_tape_uses_standard_memory_normalization_and_writer():
     assert torch.equal(output.memory_states, model.mem_head(model.ln_mem(output.hidden_states)))
 
 
-def test_memory_tape_supports_reader_placement_and_memory_width():
-    model = MemoryTapeTransformer(
-        MemoryTapeConfig(
+def test_memory_attention_supports_reader_placement_and_memory_width():
+    model = MemoryAttentionTransformer(
+        MemoryAttentionConfig(
             block_size=12,
             vocab_size=19,
             n_layer=4,
@@ -259,20 +259,20 @@ def test_memory_tape_supports_reader_placement_and_memory_width():
 
 
 def test_selective_memory_readers_reduce_parameters_and_validate_config():
-    all_readers = MemoryTapeTransformer(
-        MemoryTapeConfig(12, 19, 4, 2, 8, 3)
+    all_readers = MemoryAttentionTransformer(
+        MemoryAttentionConfig(12, 19, 4, 2, 8, 3)
     )
-    one_reader = MemoryTapeTransformer(
-        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(2,))
+    one_reader = MemoryAttentionTransformer(
+        MemoryAttentionConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(2,))
     )
     assert one_reader.get_num_params() < all_readers.get_num_params()
 
     with pytest.raises(ValueError, match="positive"):
-        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_width=0)
+        MemoryAttentionConfig(12, 19, 4, 2, 8, 3, memory_width=0)
     with pytest.raises(ValueError, match="duplicates"):
-        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(1, 1))
+        MemoryAttentionConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(1, 1))
     with pytest.raises(ValueError, match="out-of-range"):
-        MemoryTapeConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(4,))
+        MemoryAttentionConfig(12, 19, 4, 2, 8, 3, memory_read_layers=(4,))
 
 
 def test_sandwich_loop_matches_manual_prelude_core_coda_execution():
@@ -317,7 +317,7 @@ def test_causal_transformer_structured_output_and_generation():
 @pytest.mark.parametrize(
     ("model_class", "config"),
     [
-        (MemoryTapeTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
+        (MemoryAttentionTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
         (MemoryAddTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
         (LatentFeedbackTransformer, MultiPassConfig(8, 17, 1, 1, 8, 3)),
     ],
@@ -408,7 +408,7 @@ def test_fixed_point_forward_stops_unconverged_examples_at_the_cap():
     assert output.halting.converged.tolist() == [False, False]
 
 
-def test_memory_tape_is_causal_in_tokens_and_emitted_memory():
+def test_memory_attention_is_causal_in_tokens_and_emitted_memory():
     model = tiny_memory_model()
     model.eval()
     prefix = torch.tensor([[1, 2, 3, 4]])
@@ -532,12 +532,12 @@ def test_recurrent_prefill_uses_last_pass_memory_and_append_is_immutable():
 @pytest.mark.parametrize(
     "model",
     [
-        MemoryTapeTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
+        MemoryAttentionTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
         MemoryAddTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
         LatentFeedbackTransformer(MultiPassConfig(10, 17, 1, 1, 8, 3)),
     ],
 )
-def test_append_recurrent_reads_and_appends_the_frozen_emitted_tape(model):
+def test_append_recurrent_reads_and_appends_the_frozen_emitted_memory(model):
     model.eval()
     prompt = torch.tensor([[1, 2, 3, 4]])
     state = model.prefill_recurrent(prompt)
@@ -593,7 +593,7 @@ def test_generation_restores_mode_and_validates_sampling_even_for_zero_tokens():
 @pytest.mark.parametrize(
     "model",
     [
-        MemoryTapeTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
+        MemoryAttentionTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
         MemoryAddTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
         LatentFeedbackTransformer(MultiPassConfig(8, 17, 1, 1, 8, 3)),
     ],
@@ -614,7 +614,7 @@ def test_model_factory_constructs_supported_architectures():
     )
     expected = {
         "transformer": CausalTransformer,
-        "memory_tape": MemoryTapeTransformer,
+        "memory_attention": MemoryAttentionTransformer,
         "memory_add": MemoryAddTransformer,
         "latent_feedback": LatentFeedbackTransformer,
     }
@@ -634,7 +634,7 @@ def test_model_factory_constructs_supported_architectures():
 def test_model_factory_applies_rope_to_self_attention_in_every_architecture():
     for architecture in (
         "transformer",
-        "memory_tape",
+        "memory_attention",
         "memory_add",
         "latent_feedback",
         "sandwich_loop",
@@ -660,7 +660,7 @@ def test_architecture_capabilities_distinguish_depth_loops_from_memory_models():
     assert not supports_fixed_point_training("sandwich_loop")
     assert not supports_append_recurrent("sandwich_loop")
     assert not supports_memory_diagnostics("sandwich_loop")
-    for architecture in ("memory_tape", "memory_add", "latent_feedback"):
+    for architecture in ("memory_attention", "memory_add", "latent_feedback"):
         assert supports_pass_override(architecture)
         assert uses_pass_loss_weights(architecture)
         assert supports_fixed_point_training(architecture)
@@ -668,7 +668,7 @@ def test_architecture_capabilities_distinguish_depth_loops_from_memory_models():
         assert supports_memory_diagnostics(architecture)
 
 
-@pytest.mark.parametrize("architecture", ["memory_tape", "memory_add"])
+@pytest.mark.parametrize("architecture", ["memory_attention", "memory_add"])
 def test_canonical_memory_models_have_no_gate_parameters(architecture):
     args = SimpleNamespace(
         architecture=architecture,

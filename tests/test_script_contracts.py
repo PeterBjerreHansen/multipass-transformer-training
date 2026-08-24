@@ -63,7 +63,7 @@ def test_canonical_training_launchers_do_not_accept_scientific_overrides():
     trace_text = launchers[1].read_text(encoding="utf-8")
     assert 'TASKS="${TASKS:-maze}"' in trace_text
     assert (
-        'ARCHITECTURES="${ARCHITECTURES:-transformer memory_tape memory_add latent_feedback}"'
+        'ARCHITECTURES="${ARCHITECTURES:-transformer memory_attention memory_add latent_feedback}"'
         in trace_text
     )
 
@@ -154,7 +154,7 @@ def test_trace_eval_routes_to_task_specific_evaluator(tmp_path):
     log_path.unlink()
     (run_dir / "config.json").write_text(
         json.dumps(
-            {"args": {"task": "othello", "architecture": "memory_tape"}}
+            {"args": {"task": "othello", "architecture": "memory_attention"}}
         ),
         encoding="utf-8",
     )
@@ -237,7 +237,7 @@ def test_bbh_launcher_passes_supported_architecture_names(tmp_path):
             "PATH": f"{bin_dir}:{env['PATH']}",
             "REAL_PYTHON": sys.executable,
             "TASKS": "permutation",
-            "ARCHITECTURES": "memory_add memory_tape",
+            "ARCHITECTURES": "memory_add memory_attention",
             "SEEDS": "1337",
             "RESULT_ROOT": str(tmp_path / "results"),
         }
@@ -253,7 +253,7 @@ def test_bbh_launcher_passes_supported_architecture_names(tmp_path):
     calls = log_path.read_text(encoding="utf-8").splitlines()
     assert len(calls) == 2
     assert "--architecture memory_add" in calls[0]
-    assert "--architecture memory_tape" in calls[1]
+    assert "--architecture memory_attention" in calls[1]
 
 
 def test_bbh_launcher_rejects_entire_bad_matrix_before_starting(tmp_path):
@@ -264,7 +264,7 @@ def test_bbh_launcher_rejects_entire_bad_matrix_before_starting(tmp_path):
             "PATH": f"{bin_dir}:{env['PATH']}",
             "REAL_PYTHON": sys.executable,
             "TASKS": "permutation",
-            "ARCHITECTURES": "memory_add memory_tape#",
+            "ARCHITECTURES": "memory_add memory_attention#",
             "SEEDS": "1337",
         }
     )
@@ -277,5 +277,5 @@ def test_bbh_launcher_rejects_entire_bad_matrix_before_starting(tmp_path):
         text=True,
     )
     assert result.returncode == 2
-    assert "invalid architecture in matrix: memory_tape#" in result.stderr
+    assert "invalid architecture in matrix: memory_attention#" in result.stderr
     assert not log_path.exists()

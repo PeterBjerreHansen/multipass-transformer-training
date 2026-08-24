@@ -20,7 +20,7 @@ run_trace_pilot_variant() {
   local variant="$1"
   shift
   local preset="${PILOT_PRESET:-shortest_path_main}"
-  local architecture="${PILOT_ARCHITECTURE:-memory_tape}"
+  local architecture="${PILOT_ARCHITECTURE:-memory_attention}"
   local seed="${SEED:-1337}"
   local device
   device="$(local_pilot_device)"
